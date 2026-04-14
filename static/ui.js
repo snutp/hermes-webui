@@ -371,26 +371,27 @@ function getModelLabel(modelId){
   return modelId.split('/').pop()||'Unknown';
 }
 
+// AIGMT: Post-process rendered HTML to convert MEDIA:<path> text into inline elements.
+// Called AFTER renderMd so the raw HTML is already escaped and we inject safe tags.
+function _resolveMediaTags(html){
+  return html.replace(/MEDIA:([\S]+?)(?=<|&lt;|\s|$)/g, function(_,fpath){
+    // fpath may have been HTML-escaped by renderMd
+    var p=fpath.replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>');
+    var ext=(p.split('.').pop()||'').toLowerCase();
+    var src='/api/file/raw?path='+encodeURIComponent(p);
+    var name=p.split('/').pop();
+    if('png jpg jpeg gif webp bmp svg'.split(' ').indexOf(ext)>=0)
+      return '<img src="'+src+'" alt="'+name+'" style="max-width:100%;border-radius:8px;margin:8px 0;display:block" loading="lazy">';
+    if('mp4 webm mov'.split(' ').indexOf(ext)>=0)
+      return '<video controls src="'+src+'" style="max-width:100%;border-radius:8px;margin:8px 0"></video>';
+    if('mp3 wav m4a ogg'.split(' ').indexOf(ext)>=0)
+      return '<audio controls src="'+src+'" style="margin:8px 0"></audio>';
+    return '<a href="'+src+'" target="_blank" rel="noopener">📎 '+name+'</a>';
+  });
+}
+
 function renderMd(raw){
   let s=raw||'';
-  // AIGMT: Convert MEDIA:<path> tags to inline previews via /api/file/raw
-  // Stash the generated HTML so it survives the markdown escaping pipeline
-  const media_stash=[];
-  s=s.replace(/MEDIA:(\S+)/g, function(_match,fpath){
-    var ext=(fpath.split('.').pop()||'').toLowerCase();
-    var src='/api/file/raw?path='+encodeURIComponent(fpath);
-    var html;
-    if(['png','jpg','jpeg','gif','webp','bmp','svg'].indexOf(ext)>=0)
-      html='<img src="'+src+'" alt="'+fpath.split('/').pop()+'" style="max-width:100%;border-radius:8px;margin:8px 0" loading="lazy">';
-    else if(['mp4','webm','mov'].indexOf(ext)>=0)
-      html='<video controls src="'+src+'" style="max-width:100%;border-radius:8px;margin:8px 0"></video>';
-    else if(['mp3','wav','m4a','ogg'].indexOf(ext)>=0)
-      html='<audio controls src="'+src+'" style="margin:8px 0"></audio>';
-    else
-      html='<a href="'+src+'" target="_blank" style="text-decoration:underline">\ud83d\udcce '+fpath.split('/').pop()+'</a>';
-    media_stash.push(html);
-    return '\x00M'+(media_stash.length-1)+'\x00';
-  });
   // Pre-pass: decode HTML entities first so markdown processing works correctly.
   // This prevents double-escaping when LLM outputs entities like &lt; &gt; &amp;
   const decode=s=>s.replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&amp;/g,'&').replace(/&quot;/g,'"').replace(/&#39;/g,"'");
@@ -511,8 +512,8 @@ function renderMd(raw){
   });
   const parts=s.split(/\n{2,}/);
   s=parts.map(p=>{p=p.trim();if(!p)return '';if(/^<(h[1-6]|ul|ol|pre|hr|blockquote)/.test(p))return p;return `<p>${p.replace(/\n/g,'<br>')}</p>`;}).join('\n');
-  // AIGMT: Restore MEDIA stash — must be last so HTML tags are not escaped
-  s=s.replace(/\x00M(\d+)\x00/g,(_,i)=>media_stash[+i]||'');
+  // AIGMT: resolve MEDIA: tags after all markdown processing is done
+  s=_resolveMediaTags(s);
   return s;
 }
 
