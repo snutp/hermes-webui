@@ -160,11 +160,12 @@ def _reload_dotenv(home: Path):
 def init_profile_state() -> None:
     """Initialize profile state at server startup.
 
-    Reads ~/.hermes/active_profile, sets HERMES_HOME env var, patches
-    module-level cached paths.  Called once from config.py after imports.
+    Reads HERMES_WEBUI_ACTIVE_PROFILE env var first, then falls back to
+    ~/.hermes/active_profile file.  Called once from config.py after imports.
     """
     global _active_profile
-    _active_profile = _read_active_profile_file()
+    env_profile = os.getenv('HERMES_WEBUI_ACTIVE_PROFILE', '').strip()
+    _active_profile = env_profile if env_profile else _read_active_profile_file()
     home = get_active_hermes_home()
     _set_hermes_home(home)
     _reload_dotenv(home)
