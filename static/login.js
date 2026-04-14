@@ -52,4 +52,15 @@ document.addEventListener('DOMContentLoaded', function () {
       doLogin(e);
     }
   });
+
+  // Auto-login via URL token parameter (?token=<password>)
+  // Used by AIGMT Portal to bypass manual password entry
+  var params = new URLSearchParams(window.location.search);
+  var autoToken = params.get('token');
+  if (autoToken) {
+    // Clear the token from the URL immediately (security)
+    window.history.replaceState({}, '', '/login');
+    input.value = autoToken;
+    doLogin(new Event('submit'));
+  }
 });
