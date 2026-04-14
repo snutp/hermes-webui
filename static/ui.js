@@ -373,6 +373,18 @@ function getModelLabel(modelId){
 
 function renderMd(raw){
   let s=raw||'';
+  // AIGMT: Convert MEDIA:<path> tags to inline previews via /api/file/raw
+  s=s.replace(/MEDIA:(\S+)/g, function(_match,fpath){
+    var ext=(fpath.split('.').pop()||'').toLowerCase();
+    var src='/api/file/raw?path='+encodeURIComponent(fpath);
+    if(['png','jpg','jpeg','gif','webp','bmp','svg'].indexOf(ext)>=0)
+      return '<img src="'+src+'" alt="'+fpath.split('/').pop()+'" style="max-width:100%;border-radius:8px;margin:8px 0" loading="lazy">';
+    if(['mp4','webm','mov'].indexOf(ext)>=0)
+      return '<video controls src="'+src+'" style="max-width:100%;border-radius:8px;margin:8px 0"></video>';
+    if(['mp3','wav','m4a','ogg'].indexOf(ext)>=0)
+      return '<audio controls src="'+src+'" style="margin:8px 0"></audio>';
+    return '<a href="'+src+'" target="_blank" style="text-decoration:underline">📎 '+fpath.split('/').pop()+'</a>';
+  });
   // Pre-pass: decode HTML entities first so markdown processing works correctly.
   // This prevents double-escaping when LLM outputs entities like &lt; &gt; &amp;
   const decode=s=>s.replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&amp;/g,'&').replace(/&quot;/g,'"').replace(/&#39;/g,"'");
