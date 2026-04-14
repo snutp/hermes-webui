@@ -526,6 +526,10 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/file/raw":
         return _handle_file_raw(handler, parsed)
 
+    # AIGMT: Serve files relative to HERMES_HOME (for MEDIA: tag rendering)
+    if parsed.path == "/api/home-file":
+        return _handle_home_file(handler, parsed)
+
     if parsed.path == "/api/file":
         return _handle_file_read(handler, parsed)
 
@@ -1395,6 +1399,45 @@ def _handle_file_raw(handler, parsed):
             "Content-Disposition",
             _content_disposition_value("inline", target.name),
         )
+    handler.end_headers()
+    handler.wfile.write(raw_bytes)
+    return True
+
+
+def _handle_home_file(handler, parsed):
+    """AIGMT: Serve a file by absolute path if it lives under HERMES_HOME.
+
+    Used by the MEDIA: tag renderer in the chat UI to display screenshots,
+    audio, and other files that the agent stores in the profile cache.
+    """
+    from api.config import MIME_MAP
+    qs = parse_qs(parsed.query)
+    raw_path = qs.get("path", [""])[0]
+    if not raw_path:
+        return bad(handler, "path is required")
+
+    import os
+    hermes_home = Path(os.getenv("HERMES_HOME", "~/.hermes")).expanduser().resolve()
+    target = Path(raw_path).resolve()
+
+    # Security: only serve files under HERMES_HOME
+    if not str(target).startswith(str(hermes_home)):
+        return bad(handler, "path must be under HERMES_HOME", 403)
+    if not target.exists() or not target.is_file():
+        return j(handler, {"error": "not found"}, status=404)
+
+    ext = target.suffix.lower()
+    mime = MIME_MAP.get(ext, "application/octet-stream")
+    raw_bytes = target.read_bytes()
+    handler.send_response(200)
+    handler.send_header("Content-Type", mime)
+    handler.send_header("Content-Length", str(len(raw_bytes)))
+    handler.send_header("Cache-Control", "private, max-age=3600")
+    _security_headers(handler)
+    handler.send_header(
+        "Content-Disposition",
+        _content_disposition_value("inline", target.name),
+    )
     handler.end_headers()
     handler.wfile.write(raw_bytes)
     return True

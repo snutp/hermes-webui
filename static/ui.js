@@ -372,13 +372,14 @@ function getModelLabel(modelId){
 }
 
 // AIGMT: Post-process rendered HTML to convert MEDIA:<path> text into inline elements.
-// Called AFTER renderMd so the raw HTML is already escaped and we inject safe tags.
+// Uses /api/home-file endpoint (HERMES_HOME-relative paths) for cache files,
+// or workspace /api/file/raw for workspace-relative paths.
 function _resolveMediaTags(html){
   return html.replace(/MEDIA:([\S]+?)(?=<|&lt;|\s|$)/g, function(_,fpath){
-    // fpath may have been HTML-escaped by renderMd
     var p=fpath.replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>');
     var ext=(p.split('.').pop()||'').toLowerCase();
-    var src='/api/file/raw?path='+encodeURIComponent(p);
+    // Serve via /api/home-file — path relative to HERMES_HOME
+    var src='/api/home-file?path='+encodeURIComponent(p);
     var name=p.split('/').pop();
     if('png jpg jpeg gif webp bmp svg'.split(' ').indexOf(ext)>=0)
       return '<img src="'+src+'" alt="'+name+'" style="max-width:100%;border-radius:8px;margin:8px 0;display:block" loading="lazy">';
