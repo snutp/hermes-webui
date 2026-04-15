@@ -26,7 +26,9 @@ document.addEventListener('DOMContentLoaded', function () {
     var pw = input.value;
     hideErr();
     try {
-      var res = await fetch('/api/auth/login', {
+      // Use relative paths for reverse proxy compatibility
+      var basePath = window.location.pathname.replace(/\/login\/?$/, '') || '';
+      var res = await fetch(basePath + '/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ password: pw }),
@@ -35,7 +37,7 @@ document.addEventListener('DOMContentLoaded', function () {
       var data = {};
       try { data = await res.json(); } catch (_) {}
       if (res.ok && data.ok) {
-        window.location.href = '/';
+        window.location.href = basePath + '/';
       } else {
         showErr(data.error || invalidPw);
       }
@@ -59,7 +61,8 @@ document.addEventListener('DOMContentLoaded', function () {
   var autoToken = params.get('token');
   if (autoToken) {
     // Clear the token from the URL immediately (security)
-    window.history.replaceState({}, '', '/login');
+    var basePath = window.location.pathname.replace(/\/login\/?$/, '') || '';
+    window.history.replaceState({}, '', basePath + '/login');
     input.value = autoToken;
     doLogin(new Event('submit'));
   }
