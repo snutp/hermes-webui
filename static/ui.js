@@ -1156,7 +1156,7 @@ function renderMessages(){
       lastAssist.appendChild(usage);
     }
   }
-  scrollToBottom();
+  scrollIfPinned();
   // Apply syntax highlighting after DOM is built
   requestAnimationFrame(()=>{highlightCode();addCopyButtons();renderMermaidBlocks();renderKatexBlocks();});
   // Refresh todo panel if it's currently open
