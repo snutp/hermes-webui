@@ -21,7 +21,7 @@ PUBLIC_PATHS = frozenset({
     '/api/auth/login', '/api/auth/status',
 })
 
-COOKIE_NAME = 'hermes_session'
+COOKIE_NAME = os.getenv('HERMES_WEBUI_COOKIE_NAME', 'hermes_session')
 SESSION_TTL = 86400  # 24 hours
 
 # Active sessions: token -> expiry timestamp
