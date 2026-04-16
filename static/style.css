@@ -1049,6 +1049,8 @@ body.resizing{user-select:none;cursor:col-resize;}
 .thinking-card-label{font-weight:600;letter-spacing:.02em;}
 .thinking-card-toggle{margin-left:auto;font-size:10px;transition:transform .15s;}
 .thinking-card.open .thinking-card-toggle{transform:rotate(90deg);}
+.thinking-card-chevron{margin-left:auto;transition:transform .15s;opacity:.6;}
+.thinking-card.open .thinking-card-chevron{transform:rotate(180deg);}
 .thinking-card-body{display:none;padding:0 12px 10px;max-height:300px;overflow-y:auto;}
 .thinking-card.open .thinking-card-body{display:block;}
 .thinking-card-body pre{font-family:'SF Mono',ui-monospace,monospace;font-size:11px;line-height:1.5;color:var(--muted);white-space:pre-wrap;word-break:break-word;margin:0;}
