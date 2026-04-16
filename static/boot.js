@@ -509,9 +509,58 @@ $('msg').addEventListener('paste',e=>{
   addFiles(files);
   setStatus(t('image_pasted')+files.map(f=>f.name).join(', '));
 });
-document.querySelectorAll('.suggestion').forEach(btn=>{
+/* ── Quick-start suggestions (dynamic) ── */
+const SUGGESTION_DEFAULTS=[
+  {icon:'folder',msg:'현재 프로젝트 상태 알려줘',label:'프로젝트 현황'},
+  {icon:'upload',msg:'기획 관련 자료를 분석해줘',label:'자료 분석'},
+  {icon:'layout',msg:'디자인 목업 생성해줘',label:'디자인 목업'},
+  {icon:'file-text',msg:'제안서 작성해줘',label:'제안서 작성'},
+  {icon:'code',msg:'프로토타입 빌드 시작해줘',label:'빌드 시작'},
+];
+const SUGGESTION_ICONS={
+  'folder':'<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>',
+  'upload':'<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>',
+  'layout':'<rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/>',
+  'file-text':'<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/>',
+  'code':'<polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>',
+  'play':'<polygon points="5 3 19 12 5 21 5 3"/>',
+  'rocket':'<path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z"/><path d="m12 15-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z"/><path d="M9 12H4s.55-3.03 2-4c1.62-1.08 3 0 3 0"/><path d="M12 15v5s3.03-.55 4-2c1.08-1.62 0-3 0-3"/>',
+  'zap':'<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>',
+  'search':'<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>',
+  'clipboard':'<path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/>',
+};
+function renderSuggestionBtn(s){
+  const ic=SUGGESTION_ICONS[s.icon]||SUGGESTION_ICONS['folder'];
+  const btn=document.createElement('button');
+  btn.className='suggestion';
+  btn.dataset.msg=s.msg;
+  btn.innerHTML=`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ic}</svg> <span>${s.label}</span>`;
   btn.onclick=()=>{$('msg').value=btn.dataset.msg;send();};
-});
+  return btn;
+}
+function renderSuggestions(items,statusText){
+  const grid=$('suggestionGrid');
+  if(!grid)return;
+  grid.innerHTML='';
+  if(statusText){
+    const badge=document.createElement('div');
+    badge.className='suggestion-status';
+    badge.textContent=statusText;
+    grid.appendChild(badge);
+  }
+  items.forEach(s=>grid.appendChild(renderSuggestionBtn(s)));
+}
+(async()=>{
+  try{
+    const r=await fetch('/api/quick-start');
+    if(r.ok){
+      const d=await r.json();
+      renderSuggestions(d.suggestions||SUGGESTION_DEFAULTS,d.status_label||null);
+      return;
+    }
+  }catch(e){}
+  renderSuggestions(SUGGESTION_DEFAULTS,null);
+})();
 
 window.addEventListener('resize',()=>{
   syncWorkspacePanelState();

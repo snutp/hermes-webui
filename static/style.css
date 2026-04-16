@@ -810,7 +810,8 @@
 
 
 /* Suggestion grid: consistent width */
-.suggestion-grid{width:100%;max-width:400px;}
+.suggestion-grid{width:100%;max-width:440px;}
+.suggestion-status{font-size:11px;font-weight:600;color:var(--blue);padding:4px 12px;margin-bottom:4px;border-radius:8px;background:rgba(124,185,255,.06);border:1px solid rgba(124,185,255,.15);text-align:center;letter-spacing:.3px;}
 
 /* Empty state: add subtle gradient behind logo */
 .empty-state{background:radial-gradient(ellipse at 50% 20%,rgba(124,185,255,.04) 0%,transparent 60%);}
