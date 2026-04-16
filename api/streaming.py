@@ -82,8 +82,12 @@ def _sse(handler, event, data):
     handler.wfile.flush()
 
 
-def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, attachments=None):
-    """Run agent in background thread, writing SSE events to STREAMS[stream_id]."""
+def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, attachments=None, *, chain_depth=0):
+    """Run agent in background thread, writing SSE events to STREAMS[stream_id].
+
+    ``chain_depth`` tracks the depth of auto-resume turns triggered by
+    notify_on_complete watchers. User-initiated turns enter with 0; each
+    resume hop increments it. See api/process_watcher.py for the cap."""
     q = STREAMS.get(stream_id)
     if q is None:
         return
@@ -126,21 +130,55 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             HERMES_EXEC_ASK='1',
             HERMES_SESSION_KEY=session_id,
             HERMES_HOME=_profile_home,
+            HERMES_SESSION_PLATFORM='webui',
+            HERMES_SESSION_CHAT_ID=session_id,
         )
+
+        # Bind gateway.session_context ContextVars on THIS agent thread so that
+        # terminal_tool / approval read the correct session identity via
+        # get_session_env(), regardless of what concurrent webui sessions have
+        # written to os.environ. ContextVars do not propagate across threads by
+        # default, so each _run_agent_streaming thread sets its own — that is
+        # exactly the isolation we want. Tokens are released in the finally
+        # block.
+        _ctx_tokens = None
+        try:
+            from gateway.session_context import set_session_vars as _set_ctx
+            _ctx_tokens = _set_ctx(
+                platform='webui',
+                chat_id=session_id,
+                session_key=session_id,
+            )
+        except ImportError:
+            # Older hermes-agent without the context_vars refactor — fall back
+            # to the os.environ-only path below.
+            pass
+
         # Still set process-level env as fallback for tools that bypass thread-local
         # Acquire lock only for the env mutation, then release before the agent runs.
         # The finally block re-acquires to restore — keeping critical sections short
         # and preventing a deadlock where the restore would re-enter the same lock.
+        #
+        # HERMES_SESSION_PLATFORM='webui' is required for terminal_tool to enqueue
+        # background processes into process_registry.pending_watchers (see
+        # tools/terminal_tool.py:1424 — the `if _gw_platform:` guard). Without it,
+        # notify_on_complete silently becomes a no-op. ContextVars above take
+        # precedence in get_session_env; these os.environ writes are a fallback
+        # for any tool that still reads os.getenv directly.
         with _ENV_LOCK:
             old_cwd = os.environ.get('TERMINAL_CWD')
             old_exec_ask = os.environ.get('HERMES_EXEC_ASK')
             old_session_key = os.environ.get('HERMES_SESSION_KEY')
             old_hermes_home = os.environ.get('HERMES_HOME')
+            old_session_platform = os.environ.get('HERMES_SESSION_PLATFORM')
+            old_session_chat_id = os.environ.get('HERMES_SESSION_CHAT_ID')
             os.environ['TERMINAL_CWD'] = str(s.workspace)
             os.environ['HERMES_EXEC_ASK'] = '1'
             os.environ['HERMES_SESSION_KEY'] = session_id
             if _profile_home:
                 os.environ['HERMES_HOME'] = _profile_home
+            os.environ['HERMES_SESSION_PLATFORM'] = 'webui'
+            os.environ['HERMES_SESSION_CHAT_ID'] = session_id
         # Lock released — agent runs without holding it
         # Register a gateway-style notify callback so the approval system can
         # push the `approval` SSE event the moment a dangerous command is
@@ -548,6 +586,23 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 usage['last_prompt_tokens'] = getattr(_cc, 'last_prompt_tokens', 0) or 0
             raw_session = s.compact() | {'messages': s.messages, 'tool_calls': tool_calls}
             put('done', {'session': redact_session_data(raw_session), 'usage': usage})
+
+            # ── Phase 1: auto-resume for background processes (notify_on_complete) ──
+            # Drain pending_watchers enqueued during this turn and spawn a background
+            # thread per watcher. When the process exits, the watcher triggers a
+            # resume turn that appends a synthetic [SYSTEM: ...] message to the
+            # session and re-invokes the agent — mirroring gateway/run.py:3647-3677
+            # without requiring a live SSE connection.
+            try:
+                from api.process_watcher import drain_pending_watchers
+                drain_pending_watchers(
+                    session_id=session_id,
+                    model=model,
+                    workspace=str(s.workspace),
+                    chain_depth=chain_depth,
+                )
+            except Exception:
+                logger.exception("Failed to drain pending_watchers for session %s", session_id)
         finally:
             # Unregister the gateway approval callback and unblock any threads
             # still waiting on approval (e.g. stream cancelled mid-approval).
@@ -556,6 +611,14 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                     _unreg_notify(session_id)
                 except Exception:
                     logger.debug("Failed to unregister approval callback")
+            # Reset ContextVars set at the start of the run (no-op if the
+            # gateway.session_context module wasn't importable).
+            if _ctx_tokens is not None:
+                try:
+                    from gateway.session_context import clear_session_vars as _clear_ctx
+                    _clear_ctx(_ctx_tokens)
+                except Exception:
+                    logger.debug("Failed to clear session ContextVars")
             with _ENV_LOCK:
                 if old_cwd is None: os.environ.pop('TERMINAL_CWD', None)
                 else: os.environ['TERMINAL_CWD'] = old_cwd
@@ -565,6 +628,10 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 else: os.environ['HERMES_SESSION_KEY'] = old_session_key
                 if old_hermes_home is None: os.environ.pop('HERMES_HOME', None)
                 else: os.environ['HERMES_HOME'] = old_hermes_home
+                if old_session_platform is None: os.environ.pop('HERMES_SESSION_PLATFORM', None)
+                else: os.environ['HERMES_SESSION_PLATFORM'] = old_session_platform
+                if old_session_chat_id is None: os.environ.pop('HERMES_SESSION_CHAT_ID', None)
+                else: os.environ['HERMES_SESSION_CHAT_ID'] = old_session_chat_id
 
     except Exception as e:
         print('[webui] stream error:\n' + traceback.format_exc(), flush=True)
