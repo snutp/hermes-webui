@@ -526,6 +526,10 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/file/raw":
         return _handle_file_raw(handler, parsed)
 
+    # AIGMT: Quick-start suggestions from profile directory
+    if parsed.path == "/api/quick-start":
+        return _handle_quick_start(handler, parsed)
+
     # AIGMT: Serve files relative to HERMES_HOME (for MEDIA: tag rendering)
     if parsed.path == "/api/home-file":
         return _handle_home_file(handler, parsed)
@@ -1402,6 +1406,25 @@ def _handle_file_raw(handler, parsed):
     handler.end_headers()
     handler.wfile.write(raw_bytes)
     return True
+
+
+def _handle_quick_start(handler, parsed):
+    """AIGMT: Serve quick-start suggestions from active profile's quick-start.json.
+
+    The Portal backend generates this file when starting a hermes-webui instance,
+    based on the current project status. If the file doesn't exist, returns 404
+    and the frontend falls back to hardcoded defaults.
+    """
+    import os, json
+    hermes_home = Path(os.getenv("HERMES_HOME", "~/.hermes")).expanduser().resolve()
+    qs_path = hermes_home / "quick-start.json"
+    if not qs_path.exists():
+        return j(handler, {"error": "no quick-start.json"}, status=404)
+    try:
+        data = json.loads(qs_path.read_text(encoding="utf-8"))
+    except Exception:
+        return j(handler, {"error": "invalid quick-start.json"}, status=500)
+    return j(handler, data)
 
 
 def _handle_home_file(handler, parsed):
