@@ -725,7 +725,9 @@ window._startResumeWatch = function(sessionId){
         // covers the case where another client produced a resume while
         // this tab was disconnected.
         try{
-          const sess = await api(`/api/session?session_id=${encodeURIComponent(sessionId)}`);
+          // /api/session wraps the payload as {session: {...}} — unwrap it.
+          const resp = await api(`/api/session?session_id=${encodeURIComponent(sessionId)}`);
+          const sess = (resp && resp.session) ? resp.session : resp;
           const newCount = (sess && sess.messages && sess.messages.length) || 0;
           if(newCount > lastSeenCount){
             const applied = _applyFreshSession(sess);
@@ -758,7 +760,9 @@ async function _waitForStreamToFinish(streamId, sessionId, isStale){
 
 async function _refetchSessionMessages(sessionId){
   try{
-    const sess = await api(`/api/session?session_id=${encodeURIComponent(sessionId)}`);
+    // /api/session wraps the payload as {session: {...}} — unwrap it.
+    const resp = await api(`/api/session?session_id=${encodeURIComponent(sessionId)}`);
+    const sess = (resp && resp.session) ? resp.session : resp;
     if(!sess || !sess.session_id) return;
     if(S.session && S.session.session_id === sessionId){
       S.session = sess;
