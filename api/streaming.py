@@ -2,6 +2,7 @@
 Hermes Web UI -- SSE streaming engine and agent thread runner.
 Includes Sprint 10 cancel support via CANCEL_FLAGS.
 """
+import base64
 import json
 import logging
 import os
@@ -81,6 +82,132 @@ def _sse(handler, event, data):
     payload = f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
     handler.wfile.write(payload.encode('utf-8'))
     handler.wfile.flush()
+
+
+# ── Image attachment → native content block conversion ──
+# Claude (and other native-vision providers) can see images directly when the
+# user message content is a list containing ``{"type":"image_url","image_url":{...}}``
+# blocks. Previously webui only appended the filename as text (``[Attached files:
+# cat.png]``) which forced the agent to call the vision_analyze tool roundtrip to
+# see the image. Reading and inlining the image here lets the agent's native
+# vision path handle it (see AIAgent._is_native_vision_provider).
+
+# Accept anything the upload endpoint accepts — Anthropic supports png/jpeg/gif/webp.
+_SUPPORTED_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+# Anthropic's documented max for image source data is ~5 MB per image. We
+# apply the same cap before base64-encoding to avoid oversized payloads.
+_MAX_IMAGE_BYTES = 5 * 1024 * 1024
+
+
+def _attachment_is_image(filename: str) -> bool:
+    return Path(filename).suffix.lower() in _SUPPORTED_IMAGE_EXTS
+
+
+def _image_mime_for(filename: str) -> str:
+    ext = Path(filename).suffix.lower()
+    return {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".gif": "image/gif",
+        ".webp": "image/webp",
+    }.get(ext, "image/jpeg")
+
+
+import re as _re
+
+# Client appends ``\n\n[Attached files: a.png, b.jpg]`` to the message text so
+# the assistant knows something was uploaded (see static/messages.js). When we
+# inline those images as native content blocks, the text suffix becomes
+# redundant and actively misleads the model into calling file-reading tools
+# (``read_file`` / ``vision_analyze``) on an already-visible image. Strip the
+# filenames we successfully inlined so the model trusts the content blocks.
+_ATTACHED_FILES_SUFFIX_RE = _re.compile(r"\n\n\[Attached files:([^\]]*)\]\s*$")
+
+
+def _strip_inlined_attachments_from_text(text: str, inlined_names: list[str]) -> str:
+    """Remove successfully-inlined image names from the ``[Attached files: …]``
+    suffix. If every listed name got inlined, drop the suffix entirely;
+    otherwise keep it with only the still-referenced (non-image / failed) names.
+    """
+    if not text or not inlined_names:
+        return text
+    m = _ATTACHED_FILES_SUFFIX_RE.search(text)
+    if not m:
+        return text
+    listed = [p.strip() for p in m.group(1).split(",") if p.strip()]
+    inlined_set = set(inlined_names)
+    remaining = [p for p in listed if p not in inlined_set]
+    base = text[: m.start()]
+    if not remaining:
+        return base.rstrip()
+    return f"{base}\n\n[Attached files: {', '.join(remaining)}]"
+
+
+def _build_multimodal_user_message(workspace, msg_text, attachments):
+    """Return (user_message, persist_text) for ``run_conversation``.
+
+    When *attachments* contains images that exist under *workspace*, builds a
+    list content payload ``[{"type":"text",...}, {"type":"image_url",...}]`` so
+    downstream native-vision providers see the image directly. Non-image
+    attachments remain referenced in the text (the agent can still open them
+    via file tools). Images that fail to load fall back to a text note —
+    never a hard failure, since the user already sent the turn.
+
+    The returned ``persist_text`` is always the original plain-text message;
+    the agent uses it for transcripts, memory sync, and trajectory logging so
+    those surfaces stay readable even for multimodal turns.
+    """
+    if not attachments:
+        return msg_text, msg_text
+
+    image_names = [a for a in attachments if _attachment_is_image(a)]
+    if not image_names:
+        return msg_text, msg_text
+
+    ws_path = Path(workspace)
+
+    # Build the image blocks first so we know which filenames were actually
+    # inlined, then decide how to strip the ``[Attached files: …]`` suffix.
+    inlined_names: list[str] = []
+    image_blocks: list[dict] = []
+    skipped: list[str] = []
+    for name in image_names:
+        candidate = ws_path / name
+        try:
+            if not candidate.is_file():
+                skipped.append(f"{name} (not found)")
+                continue
+            size = candidate.stat().st_size
+            if size > _MAX_IMAGE_BYTES:
+                skipped.append(f"{name} ({size // 1024}KB > 5MB cap)")
+                continue
+            data = candidate.read_bytes()
+        except OSError as err:
+            skipped.append(f"{name} ({err.__class__.__name__})")
+            continue
+        data_url = f"data:{_image_mime_for(name)};base64,{base64.b64encode(data).decode('ascii')}"
+        image_blocks.append({"type": "image_url", "image_url": {"url": data_url}})
+        inlined_names.append(name)
+
+    # No image actually made it → fall back to plain text unchanged.
+    if not image_blocks:
+        return msg_text, msg_text
+
+    cleaned_text = _strip_inlined_attachments_from_text(msg_text, inlined_names)
+    content_blocks: list[dict] = []
+    if cleaned_text:
+        content_blocks.append({"type": "text", "text": cleaned_text})
+    content_blocks.extend(image_blocks)
+
+    if skipped:
+        # Keep the turn going even if an image failed — add a marker so the
+        # assistant knows why it didn't see something the user mentioned.
+        content_blocks.append({
+            "type": "text",
+            "text": f"[Note: {len(skipped)} image attachment(s) not inlined: {', '.join(skipped)}]",
+        })
+    return content_blocks, msg_text
 
 
 def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, attachments=None, *, chain_depth=0):
@@ -397,9 +524,32 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             # Pass personality via ephemeral_system_prompt (agent's own mechanism)
             if _personality_prompt:
                 agent.ephemeral_system_prompt = _personality_prompt
+            # When image attachments are present, inline them as image_url
+            # content blocks so native-vision providers (Claude on Anthropic)
+            # see the pixels directly. _build_multimodal_user_message returns
+            # a plain string for no-image turns, preserving existing behaviour.
+            _user_payload, _persist_text = _build_multimodal_user_message(
+                workspace, workspace_ctx + msg_text, attachments or []
+            )
+            # When the turn carries native image blocks, tell the model it can
+            # see those pixels directly so it doesn't reflexively call
+            # vision_analyze / read_file on them. Without this hint the model
+            # tends to hallucinate a file path and burn tool calls even
+            # after answering correctly from the embedded image.
+            _effective_system_msg = workspace_system_msg
+            if isinstance(_user_payload, list) and any(
+                isinstance(b, dict) and b.get("type") == "image_url"
+                for b in _user_payload
+            ):
+                _effective_system_msg = workspace_system_msg + (
+                    "\n\nThe current user turn includes one or more `{type: image, ...}` "
+                    "content blocks — those images are already visible to you in this "
+                    "prompt. Answer from the pixels directly. Do NOT call vision_analyze, "
+                    "read_file, or any tool to fetch them; the image is embedded, not on disk."
+                )
             result = agent.run_conversation(
-                user_message=workspace_ctx + msg_text,
-                system_message=workspace_system_msg,
+                user_message=_user_payload,
+                system_message=_effective_system_msg,
                 conversation_history=_sanitize_messages_for_api(s.messages),
                 task_id=session_id,
                 persist_user_message=msg_text,
