@@ -510,6 +510,22 @@ def handle_get(handler, parsed) -> bool:
         stream_id = parse_qs(parsed.query).get("stream_id", [""])[0]
         return j(handler, {"active": stream_id in STREAMS, "stream_id": stream_id})
 
+    # Phase 2: discover an in-flight turn (user or auto-resume) by session.
+    # Frontend polls this after its original SSE closes so it can reattach to
+    # resume turns started by the notify_on_complete watcher without reload.
+    if parsed.path == "/api/chat/active_stream":
+        from api.config import ACTIVE_STREAM_BY_SESSION, ACTIVE_STREAM_LOCK
+        session_id = parse_qs(parsed.query).get("session_id", [""])[0]
+        if not session_id:
+            return bad(handler, "session_id required")
+        with ACTIVE_STREAM_LOCK:
+            sid = ACTIVE_STREAM_BY_SESSION.get(session_id)
+        # A stream is only considered "attachable" if it is still in STREAMS.
+        # This avoids handing the client a stream_id that has already been
+        # reaped in the teardown window.
+        live = bool(sid and sid in STREAMS)
+        return j(handler, {"stream_id": sid if live else None})
+
     if parsed.path == "/api/chat/cancel":
         stream_id = parse_qs(parsed.query).get("stream_id", [""])[0]
         if not stream_id:
