@@ -1086,3 +1086,77 @@ body.resizing{user-select:none;cursor:col-resize;}
 .session-item.cli-session[data-source="discord"]::after { color: #5865F2; }
 .session-item.cli-session[data-source="slack"] { border-left-color: #4A154B; }
 .session-item.cli-session[data-source="slack"]::after { color: #4A154B; }
+
+/* ── Phase 2: Background task completion card (auto-resume) ─────────── */
+.system-event-row { padding: 6px 12px; }
+.system-event-card {
+  border: 1px solid var(--border, rgba(128,128,128,0.28));
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--bg-subtle, rgba(128,128,128,0.06));
+  font-size: 13px;
+  max-width: 760px;
+}
+.system-event-card--success {
+  border-left: 3px solid var(--color-success, #2ea043);
+}
+.system-event-card--failure {
+  border-left: 3px solid var(--color-error, #da3633);
+}
+.system-event-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 500;
+  margin-bottom: 6px;
+}
+.system-event-card--success .system-event-icon { color: var(--color-success, #2ea043); }
+.system-event-card--failure .system-event-icon { color: var(--color-error, #da3633); }
+.system-event-badge {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  background: rgba(128,128,128,0.18);
+  color: var(--fg-muted, #6a7380);
+}
+.system-event-card--success .system-event-badge {
+  background: rgba(46,160,67,0.15);
+  color: var(--color-success, #2ea043);
+}
+.system-event-card--failure .system-event-badge {
+  background: rgba(218,54,51,0.15);
+  color: var(--color-error, #da3633);
+}
+.system-event-procid {
+  margin-left: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  opacity: 0.55;
+}
+.system-event-command code {
+  display: block;
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: rgba(128,128,128,0.1);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  overflow-x: auto;
+  white-space: pre;
+}
+.system-event-output {
+  margin: 8px 0 0 0;
+  padding: 8px 10px;
+  border-radius: 4px;
+  background: rgba(0,0,0,0.04);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  max-height: 240px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.system-event-truncation { opacity: 0.55; font-style: italic; }
+body.dark .system-event-output { background: rgba(255,255,255,0.04); }

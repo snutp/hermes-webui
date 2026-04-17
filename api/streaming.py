@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 from api.config import (
     STREAMS, STREAMS_LOCK, CANCEL_FLAGS, AGENT_INSTANCES, CLI_TOOLSETS,
     LOCK, SESSIONS, SESSION_DIR,
+    ACTIVE_STREAM_BY_SESSION, ACTIVE_STREAM_LOCK,
     _get_session_agent_lock, _set_thread_env, _clear_thread_env,
     resolve_model_provider,
 )
@@ -96,6 +97,13 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
     cancel_event = threading.Event()
     with STREAMS_LOCK:
         CANCEL_FLAGS[stream_id] = cancel_event
+
+    # Phase 2: publish this turn's stream_id under its session so clients can
+    # discover auto-resume turns launched after their original SSE closed.
+    # The frontend polls /api/chat/active_stream and reattaches when one
+    # appears. Cleared in finally below.
+    with ACTIVE_STREAM_LOCK:
+        ACTIVE_STREAM_BY_SESSION[session_id] = stream_id
 
     def put(event, data):
         # If cancelled, drop all further events except the cancel event itself
@@ -679,6 +687,12 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             STREAMS.pop(stream_id, None)
             CANCEL_FLAGS.pop(stream_id, None)
             AGENT_INSTANCES.pop(stream_id, None)  # Clean up agent instance reference
+        # Phase 2: clear the session->stream mapping only if it still points
+        # at us. If a resume turn started before we finished teardown, it has
+        # already overwritten the entry and we must not clobber its stream_id.
+        with ACTIVE_STREAM_LOCK:
+            if ACTIVE_STREAM_BY_SESSION.get(session_id) == stream_id:
+                ACTIVE_STREAM_BY_SESSION.pop(session_id, None)
 
 # ============================================================
 # SECTION: HTTP Request Handler

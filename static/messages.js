@@ -376,6 +376,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       setComposerStatus('');
       playNotificationSound();
       sendBrowserNotification('Response complete',assistantText?assistantText.slice(0,100):'Task finished');
+      // Phase 2: start watching for auto-resume turns launched by the
+      // notify_on_complete watcher. If one appears, pull the updated session
+      // and re-render so the [SYSTEM:...] + agent reply show up live.
+      if(window._startResumeWatch) window._startResumeWatch(activeSid);
     });
 
     source.addEventListener('compressed',e=>{
@@ -648,6 +652,123 @@ function sendBrowserNotification(title,body){
       if(p==='granted') new Notification(title||botName,{body:body});
     });
   }
+}
+
+// ── Phase 2: auto-resume watcher ───────────────────────────────────────────
+// After a turn's SSE closes, keep polling /api/chat/active_stream for resume
+// turns launched by the notify_on_complete process watcher (see
+// hermes-webui/api/process_watcher.py). When one is seen, wait for it to
+// finish and refetch the session so the new [SYSTEM:...] + agent reply
+// appear without a page reload. Token-by-token streaming of resume turns is
+// deferred to a later phase.
+const _RESUME_WATCH_TIMEOUT_MS = 30 * 60 * 1000;  // 30 minutes
+const _RESUME_POLL_INTERVAL_MS = 5000;
+const _RESUME_ACTIVE = {};  // session_id -> abort token (monotonic counter)
+
+window._startResumeWatch = function(sessionId){
+  if(!sessionId) return;
+  // Bump the token so any previous watcher for this session stops polling.
+  const token = (_RESUME_ACTIVE[sessionId] || 0) + 1;
+  _RESUME_ACTIVE[sessionId] = token;
+  const started = Date.now();
+  // Baseline message count so a fast resume that both starts AND finishes
+  // between two polls is still detected next tick via a message-count delta.
+  // Without this fallback, /api/chat/active_stream would return null for an
+  // already-completed resume and the new messages would stay invisible until
+  // manual reload. Codex xhigh review #2 blocker.
+  let lastSeenCount = (S.messages || []).length;
+
+  const isStale = () => (
+    _RESUME_ACTIVE[sessionId] !== token ||
+    Date.now() - started > _RESUME_WATCH_TIMEOUT_MS
+  );
+
+  const _applyFreshSession = (sess) => {
+    if(!sess || !sess.session_id) return false;
+    if(!(S.session && S.session.session_id === sessionId)) return false;
+    S.session = sess;
+    S.messages = sess.messages || [];
+    if(sess.tool_calls && sess.tool_calls.length){
+      S.toolCalls = sess.tool_calls.map(tc => ({...tc, done: true}));
+    }
+    renderMessages();
+    return true;
+  };
+
+  const poll = async () => {
+    if(isStale()) return;
+    // If the user is actively chatting (new turn in flight), let that turn's
+    // own done-handler restart the watch when it finishes.
+    if(S.busy || INFLIGHT[sessionId]){ setTimeout(poll, _RESUME_POLL_INTERVAL_MS); return; }
+    try{
+      const r = await api(`/api/chat/active_stream?session_id=${encodeURIComponent(sessionId)}`);
+      if(r && r.stream_id){
+        // A resume turn is running. Surface it in the status bar and wait
+        // for it to finish. We don't tap into the SSE token stream for this
+        // phase — we just refetch the session once the stream clears.
+        if(S.session && S.session.session_id === sessionId){
+          setComposerStatus('Background task completing…');
+        }
+        await _waitForStreamToFinish(r.stream_id, sessionId, isStale);
+        if(isStale()) return;
+        await _refetchSessionMessages(sessionId);
+        lastSeenCount = (S.messages || []).length;
+        if(S.session && S.session.session_id === sessionId){
+          setComposerStatus('');
+          playNotificationSound();
+          sendBrowserNotification('Background task completed', 'Builder finished a background task');
+        }
+      } else {
+        // Fallback: no live stream right now, but a resume turn may have
+        // both started and finished in the window between polls. Detect
+        // via message-count delta on the persisted session. This also
+        // covers the case where another client produced a resume while
+        // this tab was disconnected.
+        try{
+          const sess = await api(`/api/session?session_id=${encodeURIComponent(sessionId)}`);
+          const newCount = (sess && sess.messages && sess.messages.length) || 0;
+          if(newCount > lastSeenCount){
+            const applied = _applyFreshSession(sess);
+            lastSeenCount = newCount;
+            if(applied){
+              playNotificationSound();
+              sendBrowserNotification('Background task completed', 'Builder finished a background task');
+            }
+          }
+        }catch(_){}
+      }
+    }catch(_){ /* transient — keep polling */ }
+    setTimeout(poll, _RESUME_POLL_INTERVAL_MS);
+  };
+  setTimeout(poll, _RESUME_POLL_INTERVAL_MS);
+};
+
+async function _waitForStreamToFinish(streamId, sessionId, isStale){
+  // Poll /api/chat/stream/status until active=false, capped at 30 min.
+  const deadline = Date.now() + _RESUME_WATCH_TIMEOUT_MS;
+  while(Date.now() < deadline){
+    if(isStale()) return;
+    try{
+      const st = await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
+      if(!st.active) return;
+    }catch(_){ /* transient */ }
+    await new Promise(r => setTimeout(r, 2000));
+  }
+}
+
+async function _refetchSessionMessages(sessionId){
+  try{
+    const sess = await api(`/api/session?session_id=${encodeURIComponent(sessionId)}`);
+    if(!sess || !sess.session_id) return;
+    if(S.session && S.session.session_id === sessionId){
+      S.session = sess;
+      S.messages = sess.messages || [];
+      if(sess.tool_calls && sess.tool_calls.length){
+        S.toolCalls = sess.tool_calls.map(tc => ({...tc, done: true}));
+      }
+      renderMessages();
+    }
+  }catch(_){ /* ignore */ }
 }
 
 // ── Panel navigation (Chat / Tasks / Skills / Memory) ──

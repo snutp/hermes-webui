@@ -966,6 +966,63 @@ function msgContent(m){
   return String(c).trim();
 }
 
+// Phase 2: detect & render the synthetic [SYSTEM: Background process ...]
+// messages injected by the auto-resume watcher. Returns a <div.msg-row> with
+// the card, or null if the content does not match the pattern.
+//
+// Exact format (must track api/process_watcher.py::_format_synthetic_completion):
+//
+//   [SYSTEM: Background process <proc_id> completed (exit code <N>).
+//   Command: <cmd>
+//   Output:
+//   <trailing ansi-stripped output>]
+//
+const _SYSEVT_RE = /^\[SYSTEM: Background process (\S+) completed \(exit code (-?\d+)\)\.\nCommand: ([\s\S]*?)\nOutput:\n([\s\S]*)\]$/;
+
+function _tryRenderSystemEventCard(text, rawIdx){
+  const m = _SYSEVT_RE.exec(text);
+  if(!m) return null;
+  const procId = m[1];
+  const exitCode = parseInt(m[2], 10);
+  const cmd = m[3].trim();
+  let output = (m[4] || '').replace(/\s+$/, '');
+  const MAX_CHARS = 2400;
+  const MAX_LINES = 40;
+  let truncated = false;
+  if(output.length > MAX_CHARS){
+    output = output.slice(-MAX_CHARS);
+    truncated = true;
+  }
+  const lines = output.split('\n');
+  if(lines.length > MAX_LINES){
+    output = lines.slice(-MAX_LINES).join('\n');
+    truncated = true;
+  }
+  const ok = exitCode === 0;
+  const icon = ok ? 'check-circle' : 'x-circle';
+  const cardCls = ok ? 'system-event-card--success' : 'system-event-card--failure';
+  const label = ok ? 'Background task completed' : 'Background task failed';
+  const row = document.createElement('div');
+  row.className = 'msg-row system-event-row';
+  row.dataset.msgIdx = rawIdx;
+  row.dataset.role = 'system-event';
+  const outputHtml = output
+    ? `<pre class="system-event-output">${esc(output)}${truncated ? '\n<span class="system-event-truncation">… output truncated for display; full result preserved in session.</span>' : ''}</pre>`
+    : '';
+  row.innerHTML = `
+    <div class="system-event-card ${cardCls}">
+      <div class="system-event-header">
+        <span class="system-event-icon">${li(icon, 14)}</span>
+        <span class="system-event-label">${label}</span>
+        <span class="system-event-badge">exit ${exitCode}</span>
+        <span class="system-event-procid" title="process id">${esc(procId)}</span>
+      </div>
+      <div class="system-event-command"><code>${esc(cmd)}</code></div>
+      ${outputHtml}
+    </div>`;
+  return row;
+}
+
 function renderMessages(){
   const inner=$('msgInner');
   const vis=S.messages.filter(m=>{
@@ -1022,6 +1079,13 @@ function renderMessages(){
     }
     const isUser=m.role==='user';
     const isLastAssistant=!isUser&&vi===visWithIdx.length-1;
+    // Phase 2: synthetic [SYSTEM: Background process ...] messages from the
+    // auto-resume watcher (api/process_watcher.py::_format_synthetic_completion).
+    // Render these as a compact system-event card instead of a raw user bubble.
+    if(isUser){
+      const sysRow = _tryRenderSystemEventCard(String(content), rawIdx);
+      if(sysRow){ inner.appendChild(sysRow); continue; }
+    }
     // Render thinking card before the assistant message (collapsed by default)
     if(thinkingText&&!isUser){
       const thinkRow=document.createElement('div');thinkRow.className='msg-row thinking-card-row';

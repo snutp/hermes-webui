@@ -1079,6 +1079,14 @@ STREAMS: dict = {}
 STREAMS_LOCK = threading.Lock()
 CANCEL_FLAGS: dict = {}
 AGENT_INSTANCES: dict = {}  # stream_id -> AIAgent instance for interrupt propagation
+
+# Phase 2: session_id -> currently active stream_id. Populated by
+# _run_agent_streaming when a turn starts (user prompt OR auto-resume) and
+# cleared when it ends. The /api/chat/active_stream endpoint reads this so
+# the frontend can discover resume turns launched after the original SSE
+# connection closed, and reattach its EventSource without reload.
+ACTIVE_STREAM_BY_SESSION: dict = {}
+ACTIVE_STREAM_LOCK = threading.Lock()
 SERVER_START_TIME = time.time()
 
 # ── Thread-local env context ─────────────────────────────────────────────────
