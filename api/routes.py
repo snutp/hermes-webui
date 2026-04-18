@@ -328,12 +328,29 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/health":
         with STREAMS_LOCK:
             n_streams = len(STREAMS)
+        # Phase 3: expose in-flight workload so portal's idle reaper can
+        # decide not to kill a webui that is still executing background
+        # tasks (notify_on_complete watchers, long-running terminal procs,
+        # or active agent turns). See profile_service._collect_idle_aliases.
+        n_running_procs = 0
+        n_pending_watchers = 0
+        try:
+            from tools.process_registry import process_registry as _pr
+            n_running_procs = len(getattr(_pr, "_running", {}) or {})
+            n_pending_watchers = len(getattr(_pr, "pending_watchers", []) or [])
+        except Exception:
+            # hermes-agent not importable yet (during boot) — treat as idle.
+            logger.debug("process_registry not available for /health", exc_info=True)
+        busy_tasks = n_streams + n_running_procs + n_pending_watchers
         return j(
             handler,
             {
                 "status": "ok",
                 "sessions": len(SESSIONS),
                 "active_streams": n_streams,
+                "running_processes": n_running_procs,
+                "pending_watchers": n_pending_watchers,
+                "busy_tasks": busy_tasks,
                 "uptime_seconds": round(time.time() - SERVER_START_TIME, 1),
             },
         )
