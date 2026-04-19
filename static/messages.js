@@ -456,6 +456,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _handleStreamError();
     });
 
+    // Option C: 'cancel_pending' wakes up the EventSource instantly so the
+    // user sees a "Stopping…" hint while the server-side finalize block
+    // catches up (synthesizing tool_results, persisting the partial turn,
+    // then emitting the real 'cancel' with session). Do NOT close the
+    // source here — we still want the session-rich 'cancel' that follows.
+    source.addEventListener('cancel_pending',e=>{
+      setComposerStatus&&setComposerStatus('Stopping…');
+      markLiveToolCardsInterrupted&&markLiveToolCardsInterrupted();
+    });
+
     source.addEventListener('cancel',e=>{
       source.close();
       delete INFLIGHT[activeSid];clearInflight();clearInflightState(activeSid);stopApprovalPolling();
@@ -464,8 +474,37 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         S.activeStreamId=null;const _cbc=$('btnCancel');if(_cbc)_cbc.style.display='none';
       }
       if(S.session&&S.session.session_id===activeSid){
-        clearLiveToolCards();if(!assistantText)removeThinking();
-        S.messages.push({role:'assistant',content:'*Task cancelled.*'});renderMessages();
+        // Option C: preserve live tool cards and any partial output. Mark
+        // still-running tool cards as interrupted so the user can see which
+        // tool was in flight. The backend already synthesized tool_results
+        // for unresolved tool_use blocks (kept API history valid) and sent
+        // the updated session in `d.session`, so we refresh S.messages from
+        // that snapshot instead of pushing a synthetic assistant marker.
+        let d=null;
+        try{d=JSON.parse(e.data);}catch(_){d=null;}
+        removeThinking();
+        markLiveToolCardsInterrupted();
+        if(d&&d.session){
+          S.session=d.session;
+          S.messages=d.session.messages||S.messages;
+          if(d.session.tool_calls&&d.session.tool_calls.length){
+            S.toolCalls=d.session.tool_calls.map(tc=>({...tc,done:true}));
+          } else {
+            S.toolCalls=(S.toolCalls||[]).map(tc=>({...tc,done:true,interrupted:tc.done?false:true}));
+          }
+        } else {
+          // Fallback for pre-Option-C servers: show the simple marker.
+          S.messages.push({role:'assistant',content:'*Task cancelled.*'});
+        }
+        // Small trailing marker so the user sees WHEN the interruption
+        // happened in the visual timeline — the tool_result inside the
+        // message history already documents WHAT was cancelled.
+        const already=S.messages.length&&S.messages[S.messages.length-1];
+        if(!(already&&already.role==='assistant'&&/\bInterrupted\b/.test(already.content||''))){
+          S.messages.push({role:'assistant',content:'*Interrupted by user.*'});
+        }
+        syncTopbar&&syncTopbar();
+        renderMessages();
       }
       renderSessionList();
       if(!S.session||!INFLIGHT[S.session.session_id]){setBusy(false);setComposerStatus('');}

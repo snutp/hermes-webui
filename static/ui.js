@@ -1320,6 +1320,24 @@ function clearLiveToolCards(){
   container.style.display='none';
 }
 
+// Option C: on cancel we WANT to keep every live tool card visible and just
+// flag the unfinished ones so the user sees what was interrupted. Cards that
+// completed (done=true) keep their result unchanged; cards that were mid-run
+// (no tool_complete event arrived) get data-interrupted="1" so CSS shows a
+// distinct amber ribbon.
+function markLiveToolCardsInterrupted(){
+  const container=$('liveToolCards');
+  if(!container) return;
+  container.querySelectorAll('.tool-card.tool-card-running').forEach(card => {
+    card.setAttribute('data-interrupted','1');
+    card.classList.remove('tool-card-running');
+    // Also kill the running dot indicator (so the card doesn't keep pulsing
+    // as if work is still happening).
+    const dot = card.querySelector('.tool-card-running-dot');
+    if(dot) dot.remove();
+  });
+}
+
 // ── Edit + Regenerate ──
 
 function editMessage(btn) {

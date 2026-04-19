@@ -931,6 +931,17 @@ body.resizing{user-select:none;cursor:col-resize;}
 .tool-card{background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.07);border-radius:6px;margin:2px 0 2px 40px;overflow:hidden;transition:border-color .15s;}
 .tool-card:hover{border-color:rgba(255,255,255,.12);}
 .tool-card-running{border-color:rgba(124,185,255,.25);background:rgba(124,185,255,.04);}
+/* Option C: cancelled-mid-run cards. Amber accent + "Interrupted" ribbon so
+   the user sees WHICH tool was in flight at the moment of cancel, with the
+   partial output preserved below. */
+.tool-card[data-interrupted="1"]{border-color:rgba(245,158,11,.55);background:rgba(245,158,11,.07);}
+.tool-card[data-interrupted="1"] .tool-card-header::after{
+  content:"Interrupted"; margin-left:auto;
+  font-size:10px; font-weight:600; letter-spacing:.03em;
+  color:#f59e0b; background:rgba(245,158,11,.12);
+  border:1px solid rgba(245,158,11,.35);
+  padding:1px 6px; border-radius:10px; flex-shrink:0;
+}
 .tool-card-header{display:flex;align-items:center;gap:8px;padding:4px 10px;cursor:pointer;user-select:none;}
 .tool-card-icon{font-size:13px;flex-shrink:0;opacity:.8;}
 .tool-card-name{font-size:12px;font-weight:600;color:var(--muted);font-family:'SF Mono',ui-monospace,monospace;flex-shrink:0;}

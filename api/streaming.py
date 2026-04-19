@@ -77,6 +77,63 @@ def _sanitize_messages_for_api(messages):
     return clean
 
 
+def _finalize_cancelled_messages(messages):
+    """Pair up any unresolved tool_use blocks with synthetic tool_result
+    entries so a cancelled turn leaves the Anthropic API message history
+    valid. Claude's API requires every ``tool_use`` in an assistant message
+    to be answered by a matching ``tool_result`` in the next user message —
+    if we leave an orphan, the NEXT turn's API call fails.
+
+    Modifies ``messages`` in place (appending a synthetic user message with
+    tool_results when needed). Returns the list for convenience.
+
+    Matches Claude Code's pattern (see claw-code-source/rust/crates/runtime
+    conversation.rs:485-492) — every tool_use always gets a paired
+    tool_result, even on interrupt, with ``is_error: true`` carrying the
+    interruption message.
+    """
+    if not isinstance(messages, list) or not messages:
+        return messages
+    resolved_ids = set()
+    pending = []  # list of (tool_use_id, tool_name)
+    for m in messages:
+        if not isinstance(m, dict):
+            continue
+        role = m.get('role')
+        content = m.get('content')
+        if role == 'assistant' and isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get('type') == 'tool_use':
+                    tid = block.get('id')
+                    if tid:
+                        pending.append((tid, block.get('name') or ''))
+        elif role == 'user' and isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get('type') == 'tool_result':
+                    rid = block.get('tool_use_id')
+                    if rid:
+                        resolved_ids.add(rid)
+    unresolved = [(tid, name) for (tid, name) in pending if tid not in resolved_ids]
+    if not unresolved:
+        return messages
+    messages.append({
+        'role': 'user',
+        'content': [
+            {
+                'type': 'tool_result',
+                'tool_use_id': tid,
+                'content': (
+                    f'[Interrupted by user before `{name}` completed]'
+                    if name else '[Interrupted by user]'
+                ),
+                'is_error': True,
+            }
+            for (tid, name) in unresolved
+        ],
+    })
+    return messages
+
+
 def _sse(handler, event, data):
     """Write one SSE event to the response stream."""
     payload = f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
@@ -556,6 +613,37 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             )
             s.messages = result.get('messages') or s.messages
 
+            # ── Cancel finalization (Option C) ──
+            # User interrupted the turn. Before we exit, pair up any orphan
+            # tool_use blocks the agent emitted but didn't get a chance to
+            # resolve, persist the partial state, and emit a cancel event
+            # that carries the full session snapshot so the frontend can
+            # render the preserved turn (live tool cards stay visible, the
+            # interrupted tool gets a clear "[Interrupted by user]" result).
+            if cancel_event.is_set():
+                try:
+                    _finalize_cancelled_messages(s.messages)
+                except Exception:
+                    logger.warning("Failed to finalize cancelled messages", exc_info=True)
+                try:
+                    s.active_stream_id = None
+                    s.pending_user_message = None
+                    s.pending_attachments = []
+                    s.pending_started_at = None
+                    s.save()
+                except Exception:
+                    logger.debug("Failed to save session after cancel", exc_info=True)
+                try:
+                    raw_session = s.compact() | {'messages': s.messages, 'tool_calls': tool_calls}
+                    put('cancel', {
+                        'message': 'Cancelled by user',
+                        'session': redact_session_data(raw_session),
+                    })
+                except Exception:
+                    # Fall back to the bare cancel sentinel if redaction blows up
+                    put('cancel', {'message': 'Cancelled by user'})
+                return
+
             # ── Detect silent agent failure (no assistant reply produced) ──
             # When the agent catches an auth/network error internally it may return
             # an empty final_response without raising — the stream would end with
@@ -882,11 +970,25 @@ def cancel_stream(stream_id: str) -> bool:
                 f"cancel_event flag set, will be checked on agent startup"
             )
 
-        # Put a cancel sentinel into the queue so the SSE handler wakes up
+        # Option C: we deliberately do NOT enqueue a bare 'cancel' event here.
+        # The streaming thread's finalize block (_run_agent_streaming, just
+        # after run_conversation returns) emits a 'cancel' event that carries
+        # the full session snapshot with synthesized tool_results for any
+        # interrupted tool_use. If we queued our own 'cancel' first, the
+        # frontend would close the EventSource on receipt and never get the
+        # session-rich event, losing the preserved partial turn.
+        #
+        # But we DO need to wake the SSE handler — it's blocked on
+        # queue.get(timeout=30) and without a nudge the user-visible cancel
+        # could lag up to 30s behind the click. 'cancel_pending' is a non-
+        # terminal event (only 'done'/'error'/'cancel' break the SSE loop in
+        # routes.py:_handle_sse_stream) so it flushes through to the browser
+        # as a "Stopping…" hint and the real 'cancel' from finalize arrives
+        # right after.
         q = STREAMS.get(stream_id)
-        if q:
+        if q is not None:
             try:
-                q.put_nowait(('cancel', {'message': 'Cancelled by user'}))
+                q.put_nowait(('cancel_pending', {'message': 'Cancelling…'}))
             except Exception:
-                logger.debug("Failed to put cancel event to queue")
+                logger.debug("Failed to queue cancel_pending wake-up")
     return True

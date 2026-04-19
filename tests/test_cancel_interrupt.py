@@ -97,8 +97,13 @@ class TestCancelInterrupt:
         assert result is True
         assert cancel_event.is_set()
 
-    def test_cancel_puts_sentinel_in_queue(self):
-        """Verify that cancel_stream() puts cancel sentinel in queue"""
+    def test_cancel_queues_cancel_pending_not_cancel(self):
+        """Option C: cancel_stream() enqueues 'cancel_pending' (non-terminal
+        wake-up) but NOT 'cancel'. The real 'cancel' event with session
+        snapshot + synthesized tool_results comes from the streaming thread's
+        finalize block after run_conversation returns. Queueing a bare
+        'cancel' here would close EventSource on the frontend before the
+        session-rich event can arrive."""
         stream_id = "test_stream_queue"
         q = queue.Queue()
 
@@ -108,8 +113,11 @@ class TestCancelInterrupt:
         result = cancel_stream(stream_id)
 
         assert result is True
-        # Check that cancel message was queued
+        # Exactly one wake-up event, and it's 'cancel_pending' — never
+        # 'cancel' (which would close EventSource).
         assert not q.empty()
         event_type, data = q.get_nowait()
-        assert event_type == 'cancel'
-        assert data['message'] == 'Cancelled by user'
+        assert event_type == 'cancel_pending'
+        assert data['message'].startswith('Cancelling')
+        # No second event queued
+        assert q.empty()
