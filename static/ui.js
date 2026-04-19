@@ -1884,8 +1884,15 @@ function _renderTasksBadge(tasks, degraded=false){
     const watch = (t.watch_patterns && t.watch_patterns.length)
       ? `<span class="tasks-popover-chip" title="watch_patterns: ${esc(t.watch_patterns.join(', '))}">👁</span>`
       : '';
+    // Phase 4B — item is a clickable button-like div. Real <button> would
+    // close the popover (since popover is :hover-opened from the badge and
+    // clicking inside loses focus) so we use div + role=button + tabindex.
     return `
-      <div class="tasks-popover-item">
+      <div class="tasks-popover-item" role="button" tabindex="0"
+           data-proc-id="${esc(t.proc_id || '')}"
+           data-cmd="${esc(t.command || '')}"
+           data-pid="${esc(String(t.pid || ''))}"
+           title="Click to view live output">
         <div class="tasks-popover-row1">
           <code class="tasks-popover-id">${esc(pid)}</code>
           <span class="tasks-popover-runtime">${esc(rt)}</span>
@@ -1948,11 +1955,290 @@ function startTasksBadge(){
     // would otherwise POST if we ever nest it under a <form>.
     badge.addEventListener('click', (e) => e.preventDefault());
   }
+  // Phase 4B — wire click/keyboard on task cards to open the detail drawer.
+  // Delegated so it keeps working after _renderTasksBadge replaces innerHTML.
+  const popover = document.getElementById('tasksPopover');
+  if(popover){
+    const _open = (el) => {
+      const procId = el.getAttribute('data-proc-id');
+      const cmd = el.getAttribute('data-cmd') || '';
+      const pid = el.getAttribute('data-pid') || '';
+      if(procId) openTaskDrawer({proc_id: procId, command: cmd, pid});
+    };
+    popover.addEventListener('click', (e) => {
+      const item = e.target.closest('.tasks-popover-item[data-proc-id]');
+      if(item) _open(item);
+    });
+    popover.addEventListener('keydown', (e) => {
+      if(e.key !== 'Enter' && e.key !== ' ') return;
+      const item = e.target.closest('.tasks-popover-item[data-proc-id]');
+      if(!item) return;
+      e.preventDefault();
+      _open(item);
+    });
+  }
+}
+
+// ── Phase 4B: task output drawer ─────────────────────────────────────────
+// Poll `/api/process/tail` every _TASK_DRAWER_POLL_MS with a `since` cursor
+// and append only the new slice to the pre. Kill button POSTs to
+// /api/process/kill. Close stops polling and hides the drawer.
+//
+// We deliberately do NOT auto-stop polling when r.exited becomes true:
+// process_registry sets exited=true synchronously after kill_process sends
+// SIGTERM (even if the target traps it and stays alive), so trusting the
+// flag would silence the tail while the real process still emits output.
+// Poll keeps running until the drawer is closed; the user controls when to
+// stop looking.
+const _TASK_DRAWER_POLL_MS = 1000;
+let _taskDrawerState = null;
+// { procId, sessionId, since, timer, exited, killed, ansiResidual }
+
+function _ansiToHtml(raw, residualRef){
+  // Tiny ANSI parser — handles SGR sequences (\x1b[Xm, \x1b[1;31m, etc.) by
+  // converting them to <span class="ansi-..."> spans. Any other escape
+  // sequence (cursor moves, etc.) is stripped. This is NOT a full terminal
+  // emulator — for that we'd pull xterm.js in, which is 300kb+. For tail
+  // output this is plenty.
+  //
+  // `residualRef` is an optional {value:string} holder — when tail slices
+  // split an escape sequence across a poll boundary we stash the incomplete
+  // tail here and prepend it on the next call. Without it, the broken
+  // continuation would render as literal junk (e.g. "[31m" dangling text).
+  const FG_MAP = {30:'black',31:'red',32:'green',33:'yellow',34:'blue',35:'magenta',36:'cyan',37:'white'};
+  const htmlEsc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const out = [];
+  let i = 0;
+  const openClasses = new Set();
+  const emitText = (t) => { if(t) out.push(htmlEsc(t)); };
+  const closeAll = () => { if(openClasses.size) { out.push('</span>'); openClasses.clear(); } };
+  const openWith = (classes) => {
+    closeAll();
+    if(!classes.size) return;
+    openClasses.clear();
+    classes.forEach(c => openClasses.add(c));
+    out.push('<span class="' + [...classes].join(' ') + '">');
+  };
+  const applySGR = (codes) => {
+    // Empty or [0] resets everything
+    if(!codes.length || codes.every(c => c === 0)){ closeAll(); return; }
+    const next = new Set(openClasses);
+    for(const c of codes){
+      if(c === 0){ next.clear(); continue; }
+      if(c === 1) next.add('ansi-bold');
+      else if(c === 2) next.add('ansi-dim');
+      else if(c === 3) next.add('ansi-italic');
+      else if(c === 4) next.add('ansi-underline');
+      else if(c === 22){ next.delete('ansi-bold'); next.delete('ansi-dim'); }
+      else if(c === 23) next.delete('ansi-italic');
+      else if(c === 24) next.delete('ansi-underline');
+      else if(FG_MAP[c]){
+        // clear previous fg colors
+        [...next].forEach(cn => { if(cn.startsWith('ansi-fg-')) next.delete(cn); });
+        next.add('ansi-fg-' + FG_MAP[c]);
+      } else if(c === 39){
+        [...next].forEach(cn => { if(cn.startsWith('ansi-fg-')) next.delete(cn); });
+      }
+      // 90-97 bright variants — map to the same base color for simplicity
+      else if(c >= 90 && c <= 97){
+        [...next].forEach(cn => { if(cn.startsWith('ansi-fg-')) next.delete(cn); });
+        next.add('ansi-fg-' + FG_MAP[c - 60]);
+      }
+    }
+    openWith(next);
+  };
+  // Prepend any incomplete escape we stashed last call so split sequences
+  // still parse correctly.
+  if(residualRef && residualRef.value){
+    raw = residualRef.value + raw;
+    residualRef.value = '';
+  }
+  while(i < raw.length){
+    const esc = raw.indexOf('\x1b[', i);
+    if(esc < 0){ emitText(raw.slice(i)); break; }
+    emitText(raw.slice(i, esc));
+    // Find end of CSI sequence: any byte in 0x40-0x7E
+    let j = esc + 2;
+    while(j < raw.length && !(raw.charCodeAt(j) >= 0x40 && raw.charCodeAt(j) <= 0x7E)) j++;
+    if(j >= raw.length){
+      // Incomplete escape at end — stash raw tail so the next chunk can
+      // complete it. Cap residual length to avoid unbounded growth if a
+      // misbehaving writer spams half-escapes.
+      if(residualRef){
+        const tail = raw.slice(esc);
+        residualRef.value = tail.length > 64 ? tail.slice(0, 64) : tail;
+      }
+      break;
+    }
+    const final = raw[j];
+    const params = raw.slice(esc + 2, j);
+    if(final === 'm'){
+      const codes = params.split(';').filter(s => s !== '').map(s => parseInt(s, 10));
+      applySGR(codes.length ? codes : [0]);
+    }
+    // Other finals (H, J, K, …) — just strip.
+    i = j + 1;
+  }
+  closeAll();
+  return out.join('');
+}
+
+function openTaskDrawer({proc_id, command, pid}){
+  const sid = S.session && S.session.session_id;
+  if(!sid){ showToast('No active session'); return; }
+  if(!proc_id){ return; }
+  // Stop any previous drawer session first
+  closeTaskDrawer({silent: true});
+  const drawer = document.getElementById('taskDrawer');
+  const out = document.getElementById('taskDrawerOutput');
+  const meta = document.getElementById('taskDrawerMeta');
+  const status = document.getElementById('taskDrawerStatus');
+  const killBtn = document.getElementById('taskDrawerKill');
+  if(!drawer) return;
+  out.innerHTML = '';
+  meta.textContent = `proc ${proc_id}${pid ? ' · pid ' + pid : ''} · ${command || ''}`.trim();
+  status.className = 'task-drawer-status';
+  status.textContent = 'Connecting…';
+  killBtn.disabled = false;
+  killBtn.textContent = 'Kill';
+  drawer.setAttribute('aria-hidden', 'false');
+  drawer.dataset.open = '1';
+
+  _taskDrawerState = {
+    procId: proc_id, sessionId: sid,
+    since: 0, exited: false, killed: false,
+    timer: null, lastLength: 0,
+    ansiResidual: {value: ''},
+  };
+  _pollTaskDrawerTail();
+  _taskDrawerState.timer = setInterval(_pollTaskDrawerTail, _TASK_DRAWER_POLL_MS);
+}
+
+async function _pollTaskDrawerTail(){
+  const st = _taskDrawerState;
+  if(!st) return;
+  // Skip the network round-trip while the tab is hidden — the user can't
+  // see anything change and we'd just burn bandwidth. We still hold the
+  // drawer open; when they come back, visibilitychange triggers a manual
+  // poll to catch up.
+  if(document.hidden) return;
+  // If the user switched sessions while the drawer was open, stop tailing
+  // the old session's process — don't leak prior-session output into the
+  // current context.
+  const currentSid = S.session && S.session.session_id;
+  if(currentSid && currentSid !== st.sessionId){
+    closeTaskDrawer({silent: true});
+    return;
+  }
+  try{
+    const r = await api(`/api/process/tail?session_id=${encodeURIComponent(st.sessionId)}&proc_id=${encodeURIComponent(st.procId)}&since=${st.since}`);
+    if(_taskDrawerState !== st) return;  // drawer closed/replaced mid-flight
+    if(!r || typeof r !== 'object'){ return; }
+    if(r.degraded){
+      _setDrawerStatus('Process registry unavailable', 'err');
+      return;
+    }
+    // If server reset our cursor (buffer rolled), truncate the drawer
+    if(typeof r.since === 'number' && r.since < st.since){
+      const out = document.getElementById('taskDrawerOutput');
+      if(out){ out.innerHTML = ''; }
+      st.since = r.since;
+      // Buffer rollback invalidates any half-parsed escape too
+      st.ansiResidual.value = '';
+    }
+    if(r.output){
+      const out = document.getElementById('taskDrawerOutput');
+      const atBottom = out && (out.scrollHeight - out.scrollTop - out.clientHeight < 40);
+      if(out){ out.insertAdjacentHTML('beforeend', _ansiToHtml(r.output, st.ansiResidual)); }
+      if(atBottom && out){ out.scrollTop = out.scrollHeight; }
+    }
+    st.since = typeof r.length === 'number' ? r.length : st.since + (r.output ? r.output.length : 0);
+    if(r.exited && !st.exited){
+      st.exited = true;
+      const codeStr = (r.exit_code !== null && r.exit_code !== undefined) ? ` (exit ${r.exit_code})` : '';
+      _setDrawerStatus(`Process exited${codeStr} — still tailing in case of trailing output`, r.exit_code === 0 ? 'ok' : 'err');
+      const killBtn = document.getElementById('taskDrawerKill');
+      if(killBtn) killBtn.disabled = true;
+      // Do NOT stop polling — process_registry flips exited=true synchronously
+      // after sending SIGTERM, but a process that traps SIGTERM can keep
+      // emitting output for seconds. Keep polling so we don't lie to the
+      // user; they can close the drawer to stop when they're satisfied.
+    } else if(!r.exited){
+      _setDrawerStatus(`Live · ${r.length} bytes`, '');
+    }
+  }catch(e){
+    if(_taskDrawerState === st) _setDrawerStatus('Fetch failed — retrying', 'err');
+  }
+}
+
+function _setDrawerStatus(text, cls){
+  const el = document.getElementById('taskDrawerStatus');
+  if(!el) return;
+  el.textContent = text;
+  el.className = 'task-drawer-status' + (cls ? ' ' + cls : '');
+}
+
+async function killTaskDrawerProc(){
+  const st = _taskDrawerState;
+  if(!st || st.exited || st.killed) return;
+  const killBtn = document.getElementById('taskDrawerKill');
+  if(!killBtn) return;
+  if(!confirm('Send SIGTERM to this process?')) return;
+  killBtn.disabled = true; killBtn.textContent = 'Killing…';
+  try{
+    const r = await api('/api/process/kill', {
+      method: 'POST',
+      body: JSON.stringify({session_id: st.sessionId, proc_id: st.procId}),
+    });
+    if(r && r.status === 'killed'){
+      st.killed = true;
+      _setDrawerStatus('Kill signal sent — waiting for exit', '');
+    } else if(r && r.status === 'already_exited'){
+      _setDrawerStatus('Already exited', 'ok');
+      st.exited = true;
+    } else {
+      _setDrawerStatus('Kill: ' + (r?.error || r?.status || 'unknown'), 'err');
+      killBtn.disabled = false; killBtn.textContent = 'Kill';
+    }
+  }catch(e){
+    _setDrawerStatus('Kill request failed', 'err');
+    killBtn.disabled = false; killBtn.textContent = 'Kill';
+  }
+}
+
+function closeTaskDrawer({silent=false}={}){
+  const drawer = document.getElementById('taskDrawer');
+  if(drawer){
+    drawer.dataset.open = '0';
+    drawer.setAttribute('aria-hidden', 'true');
+  }
+  if(_taskDrawerState){
+    if(_taskDrawerState.timer) clearInterval(_taskDrawerState.timer);
+    _taskDrawerState = null;
+  }
 }
 
 // Auto-start once the DOM is ready
+function _wireTaskDrawerControls(){
+  const closeBtn = document.getElementById('taskDrawerClose');
+  const killBtn = document.getElementById('taskDrawerKill');
+  if(closeBtn) closeBtn.addEventListener('click', () => closeTaskDrawer());
+  if(killBtn) killBtn.addEventListener('click', killTaskDrawerProc);
+  // Esc closes the drawer if open
+  document.addEventListener('keydown', (e) => {
+    if(e.key === 'Escape' && _taskDrawerState){ closeTaskDrawer(); }
+  });
+  // When the user comes back to the tab, immediately poll so stale output
+  // catches up instead of waiting up to _TASK_DRAWER_POLL_MS. Also catches
+  // the edge case where the page was hidden while a kill was in flight.
+  document.addEventListener('visibilitychange', () => {
+    if(!document.hidden && _taskDrawerState) _pollTaskDrawerTail();
+  });
+}
+
 if(document.readyState === 'loading'){
-  document.addEventListener('DOMContentLoaded', startTasksBadge);
+  document.addEventListener('DOMContentLoaded', () => { startTasksBadge(); _wireTaskDrawerControls(); });
 } else {
   startTasksBadge();
+  _wireTaskDrawerControls();
 }

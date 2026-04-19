@@ -607,6 +607,68 @@ def handle_get(handler, parsed) -> bool:
             payload["degraded"] = True
         return j(handler, payload)
 
+    if parsed.path == "/api/process/tail":
+        # Phase 4B — realtime output tail for the background-task drawer.
+        # Client passes `since` (byte offset into output_buffer it last saw)
+        # and we return only the new slice + current length, so subsequent
+        # polls are cheap. Session-key gated so other sessions' processes
+        # aren't leaked.
+        q = parse_qs(parsed.query)
+        session_id = q.get("session_id", [""])[0]
+        proc_id = q.get("proc_id", [""])[0]
+        try:
+            since = int(q.get("since", ["0"])[0])
+        except ValueError:
+            since = 0
+        if not session_id or not proc_id:
+            return bad(handler, "session_id and proc_id required")
+        try:
+            from tools.process_registry import process_registry as _pr
+        except ImportError:
+            logger.debug("process_registry not importable for /api/process/tail", exc_info=True)
+            return j(handler, {
+                "proc_id": proc_id, "since": 0, "length": 0, "output": "",
+                "exited": False, "degraded": True,
+            })
+        try:
+            running = dict(getattr(_pr, "_running", {}) or {})
+            finished = dict(getattr(_pr, "_finished", {}) or {})
+        except Exception:
+            logger.warning("process_registry introspection failed for /api/process/tail", exc_info=True)
+            return j(handler, {
+                "proc_id": proc_id, "since": since, "length": 0, "output": "",
+                "exited": False, "degraded": True,
+            })
+        sess = running.get(proc_id) or finished.get(proc_id)
+        # Uniform 404 for both "unknown proc_id" and "proc exists but belongs
+        # to another session" so we don't leak cross-session process existence
+        # via status code differentiation (Codex review). Since proc_ids are
+        # random UUIDs the leak is small, but unifying the error is free.
+        if sess is None or getattr(sess, "session_key", "") != session_id:
+            return bad(handler, "process not found", 404)
+        lock = getattr(sess, "_lock", None)
+        if lock is not None:
+            with lock:
+                buf = getattr(sess, "output_buffer", "") or ""
+        else:
+            buf = getattr(sess, "output_buffer", "") or ""
+        length = len(buf)
+        # Clamp since to a valid slice. When the rolling buffer truncates the
+        # client's cursor (output_buffer shrinks), return whatever we have
+        # from byte 0 and the client resyncs — better than returning an empty
+        # string and losing context.
+        if since < 0 or since > length:
+            since = 0
+        output = buf[since:]
+        return j(handler, {
+            "proc_id": proc_id,
+            "since": since,
+            "length": length,
+            "output": output,
+            "exited": bool(getattr(sess, "exited", False)),
+            "exit_code": getattr(sess, "exit_code", None),
+        })
+
     if parsed.path == "/api/chat/cancel":
         stream_id = parse_qs(parsed.query).get("stream_id", [""])[0]
         if not stream_id:
@@ -741,6 +803,52 @@ def handle_post(handler, parsed) -> bool:
         return handle_transcribe(handler)
 
     body = read_body(handler)
+
+    if parsed.path == "/api/process/kill":
+        # Phase 4B — kill a running background task from the drawer. Wraps
+        # process_registry.kill_process() which handles PTY/Popen/sandbox
+        # kill paths + idempotent state transition + pending_watchers cleanup.
+        # Session-key gated so a tab can't reach into another session's
+        # processes.
+        session_id = str(body.get("session_id", "") or "")
+        proc_id = str(body.get("proc_id", "") or "")
+        if not session_id or not proc_id:
+            return bad(handler, "session_id and proc_id required")
+        try:
+            from tools.process_registry import process_registry as _pr
+        except ImportError:
+            return bad(handler, "process_registry unavailable", 503)
+        try:
+            running = dict(getattr(_pr, "_running", {}) or {})
+        except Exception:
+            logger.warning("process_registry introspection failed for /api/process/kill", exc_info=True)
+            return bad(handler, "process registry introspection failed", 503)
+        sess = running.get(proc_id)
+        # Uniform 404 for both "unknown" and "wrong session" so status codes
+        # don't leak cross-session existence. If the process is actually
+        # finished AND belongs to this session, surface the already_exited
+        # status (useful UI info). Otherwise 404.
+        if sess is None:
+            try:
+                finished = dict(getattr(_pr, "_finished", {}) or {})
+            except Exception:
+                finished = {}
+            done_sess = finished.get(proc_id)
+            if done_sess is not None and getattr(done_sess, "session_key", "") == session_id:
+                return j(handler, {
+                    "status": "already_exited",
+                    "exit_code": getattr(done_sess, "exit_code", None),
+                    "session_id": proc_id,
+                })
+            return bad(handler, "process not found", 404)
+        if getattr(sess, "session_key", "") != session_id:
+            return bad(handler, "process not found", 404)
+        try:
+            result = _pr.kill_process(proc_id)
+        except Exception as exc:
+            logger.warning("kill_process raised", exc_info=True)
+            return bad(handler, f"kill failed: {exc}", 500)
+        return j(handler, result)
 
     if parsed.path == "/api/session/new":
         s = new_session(workspace=body.get("workspace"), model=body.get("model"))

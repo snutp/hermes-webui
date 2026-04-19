@@ -605,6 +605,22 @@
   </div>
 </div>
 <div class="toast" id="toast"></div>
+<!-- Phase 4B: background-task output drawer. Slides in from the right when
+     a task card in the tasks popover is clicked. Hidden by default. -->
+<div class="task-drawer" id="taskDrawer" aria-hidden="true" role="dialog" aria-labelledby="taskDrawerTitle" aria-modal="false">
+  <div class="task-drawer-header">
+    <div class="task-drawer-header-text">
+      <div id="taskDrawerTitle" class="task-drawer-title">Task output</div>
+      <div id="taskDrawerMeta" class="task-drawer-meta"></div>
+    </div>
+    <div class="task-drawer-actions">
+      <button type="button" class="task-drawer-btn task-drawer-btn--kill" id="taskDrawerKill" title="Send SIGTERM">Kill</button>
+      <button type="button" class="task-drawer-btn task-drawer-btn--close" id="taskDrawerClose" aria-label="Close drawer">✕</button>
+    </div>
+  </div>
+  <div id="taskDrawerStatus" class="task-drawer-status" role="status" aria-live="polite"></div>
+  <pre id="taskDrawerOutput" class="task-drawer-output" aria-live="polite"></pre>
+</div>
 <script src="/static/i18n.js"></script>
 <script src="/static/icons.js"></script>
 <script src="/static/ui.js"></script>
