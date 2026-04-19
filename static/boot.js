@@ -646,32 +646,33 @@ function applyBotName(){
   if(profileLabel) profileLabel.textContent=S.activeProfile||'default';
   // Phase 5: persist "last seen" context for the agent-offline.html fallback.
   // When portal reaps this webui and the browser hits a 502, that page reads
-  // localStorage['webui:last'] to show when the user was last here and which
-  // project to restart. Refreshed every 30s while the tab is alive.
+  // localStorage['webui:last:<port>'] to show when the user was last here
+  // and which project to restart. Per-port key so multi-tab / project-switch
+  // doesn't resurrect the wrong webui (Codex review blocker #2).
   (function _initLastSeen(){
     function save(){
       try{
         const portMatch = location.pathname.match(/\/agent\/(\d+)/);
         const port = portMatch ? portMatch[1] : null;
+        if(!port) return;
         const profile = (S && S.activeProfile) || 'default';
         // profile naming convention from portal: "portal-<code>" (lowercase).
-        // Portal URLs use the code in uppercase; store both so the offline
-        // page can round-trip cleanly.
+        // Portal URLs use the code in uppercase; normalise so the offline
+        // page can round-trip to /projects/<CODE>.
         const m = profile.match(/^portal-(.+)$/i);
         const codeRaw = m ? m[1] : null;
         const projectCode = codeRaw ? codeRaw.toUpperCase() : null;
-        localStorage.setItem('webui:last', JSON.stringify({
-          ts: Date.now(),
-          port,
-          profile,
-          projectCode,
-        }));
+        const payload = JSON.stringify({
+          ts: Date.now(), port, profile, projectCode,
+        });
+        // Per-port key (primary) + legacy global key (back-compat for offline
+        // pages served before this change rolled out).
+        localStorage.setItem('webui:last:' + port, payload);
+        localStorage.setItem('webui:last', payload);
       }catch(e){ /* localStorage full / blocked — safe to ignore */ }
     }
     save();
     setInterval(save, 30000);
-    // Also refresh on visibilitychange so the timestamp doesn't lag when the
-    // user returns to a long-idle tab right before the reaper fires.
     document.addEventListener('visibilitychange', () => { if(!document.hidden) save(); });
   })();
   // Fetch available models from server and populate dropdown dynamically
