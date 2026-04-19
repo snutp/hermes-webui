@@ -1823,3 +1823,136 @@ async function uploadPendingFiles(){
   return names;
 }
 
+
+// ── Phase 4A: running-tasks badge + hover popover ──────────────────────────
+// Polls /api/process/list for the current session every 2s and updates the
+// topbar badge. The popover lists each running proc's id/command/runtime.
+// Phase 4B will wire click → live output tail + kill button.
+const _TASKS_BADGE_POLL_MS = 2000;
+let _tasksBadgeTimer = null;
+let _tasksBadgeLastSid = null;
+
+function _fmtRuntime(seconds){
+  const s = Math.max(0, Math.floor(seconds || 0));
+  if(s < 60) return s + 's';
+  const m = Math.floor(s / 60), r = s % 60;
+  if(m < 60) return m + 'm ' + String(r).padStart(2,'0') + 's';
+  const h = Math.floor(m / 60), mm = m % 60;
+  return h + 'h ' + String(mm).padStart(2,'0') + 'm';
+}
+
+function _renderTasksBadge(tasks, degraded=false){
+  const badge = document.getElementById('tasksBadge');
+  const popover = document.getElementById('tasksPopover');
+  if(!badge || !popover) return;
+  const n = Array.isArray(tasks) ? tasks.length : 0;
+  const running = n > 0;
+  badge.classList.toggle('tasks-badge--degraded', !!degraded);
+  // Update aria-live label when EITHER the count or the degraded flag
+  // changes — otherwise a transition into degraded state with the same
+  // count would be visual-only and screen readers wouldn't notice.
+  const prevCount = parseInt(badge.dataset.taskCount || '-1', 10);
+  const prevDegraded = badge.dataset.degraded === '1';
+  const changed = (prevCount !== n) || (prevDegraded !== !!degraded);
+  badge.dataset.taskCount = String(n);
+  badge.dataset.degraded = degraded ? '1' : '0';
+  badge.classList.toggle('tasks-badge--running', running && !degraded);
+  badge.classList.toggle('tasks-badge--idle', !running && !degraded);
+  if(changed){
+    const label = badge.querySelector('.tasks-badge-label');
+    const text = degraded
+      ? 'tasks: status unknown'
+      : (running ? `${n} task${n>1?'s':''} running` : 'idle');
+    if(label) label.textContent = text;
+    badge.setAttribute('aria-label', degraded
+      ? 'Task status unavailable (webui could not read the process registry)'
+      : (running
+        ? `${n} background task${n>1?'s':''} running`
+        : 'No background tasks running'));
+  }
+  if(!running){
+    popover.innerHTML = '<div class="tasks-popover-empty">No background tasks.</div>';
+    return;
+  }
+  const rows = tasks.map(t => {
+    const pid = t.proc_id ? String(t.proc_id).slice(0, 17) : '?';
+    const cmd = (t.command || '').slice(0, 80);
+    const rt = _fmtRuntime(t.runtime_sec);
+    const notify = t.notify_on_complete
+      ? '<span class="tasks-popover-chip tasks-popover-chip--notify" title="notify_on_complete">🔔</span>'
+      : '';
+    const watch = (t.watch_patterns && t.watch_patterns.length)
+      ? `<span class="tasks-popover-chip" title="watch_patterns: ${esc(t.watch_patterns.join(', '))}">👁</span>`
+      : '';
+    return `
+      <div class="tasks-popover-item">
+        <div class="tasks-popover-row1">
+          <code class="tasks-popover-id">${esc(pid)}</code>
+          <span class="tasks-popover-runtime">${esc(rt)}</span>
+          ${notify}${watch}
+        </div>
+        <div class="tasks-popover-cmd"><code>${esc(cmd)}</code></div>
+      </div>`;
+  }).join('');
+  popover.innerHTML =
+    `<div class="tasks-popover-header">${n} background task${n>1?'s':''}</div>${rows}`
+    + '<div class="tasks-popover-footer">webui idle-reaper skips while running</div>';
+}
+
+async function _pollTasksBadge(){
+  const sid = S.session && S.session.session_id;
+  if(!sid){
+    _renderTasksBadge([]);
+    return;
+  }
+  try{
+    const r = await api(`/api/process/list?session_id=${encodeURIComponent(sid)}`);
+    // sanity: respond only if session is still the one we queried
+    if(S.session && S.session.session_id === sid){
+      _renderTasksBadge(Array.isArray(r?.tasks) ? r.tasks : [], !!r?.degraded);
+    }
+  }catch(_){
+    // transient — keep previous state
+  }
+}
+
+function startTasksBadge(){
+  if(_tasksBadgeTimer) return;
+  // Kick immediately so the badge never stays stale on session switch
+  if(!document.hidden) _pollTasksBadge();
+  _tasksBadgeTimer = setInterval(() => {
+    // Pause polling while the tab is hidden — no point refreshing a badge
+    // no one can see, and it avoids background-tab request churn.
+    if(document.hidden) return;
+    const sid = S.session && S.session.session_id;
+    if(sid !== _tasksBadgeLastSid){
+      _tasksBadgeLastSid = sid;
+      _pollTasksBadge();  // immediate refresh on session change
+    } else {
+      _pollTasksBadge();
+    }
+  }, _TASKS_BADGE_POLL_MS);
+  // Refresh immediately when user returns to this tab
+  document.addEventListener('visibilitychange', () => {
+    if(!document.hidden) _pollTasksBadge();
+  });
+  // Wire popover aria-expanded to interaction state for a11y
+  const badge = document.getElementById('tasksBadge');
+  if(badge){
+    const setExpanded = (v) => badge.setAttribute('aria-expanded', v ? 'true' : 'false');
+    badge.addEventListener('mouseenter', () => setExpanded(true));
+    badge.addEventListener('mouseleave', () => setExpanded(false));
+    badge.addEventListener('focus', () => setExpanded(true));
+    badge.addEventListener('blur', () => setExpanded(false));
+    // Stop spurious form submission — the badge is a <button> so Space/Enter
+    // would otherwise POST if we ever nest it under a <form>.
+    badge.addEventListener('click', (e) => e.preventDefault());
+  }
+}
+
+// Auto-start once the DOM is ready
+if(document.readyState === 'loading'){
+  document.addEventListener('DOMContentLoaded', startTasksBadge);
+} else {
+  startTasksBadge();
+}

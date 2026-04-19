@@ -1160,3 +1160,149 @@ body.resizing{user-select:none;cursor:col-resize;}
 }
 .system-event-truncation { opacity: 0.55; font-style: italic; }
 body.dark .system-event-output { background: rgba(255,255,255,0.04); }
+
+/* ── Phase 4A: running-tasks badge + popover ───────────────────────────── */
+.tasks-badge {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  cursor: default;
+  user-select: none;
+  background: rgba(128,128,128,0.12);
+  border: 1px solid rgba(128,128,128,0.2);
+  transition: background .15s, opacity .15s;
+  outline: none;
+}
+.tasks-badge-dot {
+  display: inline-block;
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: #8a8a8a;
+  flex-shrink: 0;
+}
+.tasks-badge--idle { opacity: 0.55; }
+.tasks-badge--idle .tasks-badge-label { color: var(--fg-muted, #8a8a8a); }
+.tasks-badge--running {
+  background: rgba(46,160,67,0.14);
+  border-color: rgba(46,160,67,0.45);
+  opacity: 1;
+}
+.tasks-badge--running .tasks-badge-dot {
+  background: var(--color-success, #2ea043);
+  animation: tasksBadgePulse 1.6s ease-in-out infinite;
+  box-shadow: 0 0 0 0 rgba(46,160,67,0.55);
+}
+.tasks-badge--running .tasks-badge-label {
+  color: var(--color-success, #2ea043);
+  font-weight: 600;
+}
+@keyframes tasksBadgePulse {
+  0%,100% { box-shadow: 0 0 0 0 rgba(46,160,67,0.55); }
+  50%     { box-shadow: 0 0 0 5px rgba(46,160,67,0); }
+}
+/* Popover */
+.tasks-popover {
+  display: none;
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  /* Clamp dimensions to the viewport so the popover never renders off-screen
+     on narrow layouts (mobile / split panels). */
+  min-width: min(320px, calc(100vw - 32px));
+  max-width: min(460px, calc(100vw - 32px));
+  max-height: min(340px, calc(100vh - 120px));
+  overflow-y: auto;
+  padding: 10px 12px;
+  background: var(--bg-subtle, #0f172a);
+  color: var(--fg, #e2e8f0);
+  border: 1px solid rgba(128,128,128,0.25);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.22);
+  font-size: 12px;
+  z-index: 200;
+  text-align: left;
+  cursor: default;
+}
+/* Popover reveal — bound to the wrapper so it covers hover + focus within
+   whichever element (button or popover itself) holds the interaction. */
+.tasks-badge-wrap { position: relative; display: inline-flex; }
+.tasks-badge-wrap:hover .tasks-popover,
+.tasks-badge-wrap:focus-within .tasks-popover {
+  display: block;
+}
+/* The badge is a real <button> now — neutralize default browser styling */
+.tasks-badge {
+  appearance: none; -webkit-appearance: none;
+  font: inherit; color: inherit;
+}
+/* Degraded state: webui can't introspect process_registry (upstream rename,
+   etc.). Fall back visually so users know the count is unreliable. */
+.tasks-badge--degraded {
+  background: rgba(234,179,8,0.14);
+  border-color: rgba(234,179,8,0.45);
+  opacity: 1;
+}
+.tasks-badge--degraded .tasks-badge-dot {
+  background: #eab308;
+  animation: none;
+  box-shadow: none;
+}
+.tasks-badge--degraded .tasks-badge-label { color: #eab308; }
+.tasks-popover-header {
+  font-weight: 600;
+  margin-bottom: 6px;
+  opacity: 0.85;
+}
+.tasks-popover-empty {
+  opacity: 0.6;
+  font-style: italic;
+}
+.tasks-popover-item {
+  padding: 6px 0;
+  border-top: 1px solid rgba(128,128,128,0.18);
+}
+.tasks-popover-item:first-of-type { border-top: none; }
+.tasks-popover-row1 {
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 2px;
+}
+.tasks-popover-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  background: rgba(128,128,128,0.15);
+  padding: 1px 6px; border-radius: 4px;
+}
+.tasks-popover-runtime {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: var(--fg-muted, #94a3b8);
+}
+.tasks-popover-chip {
+  font-size: 12px;
+  opacity: 0.8;
+}
+.tasks-popover-cmd code {
+  display: block;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  padding: 3px 6px;
+  background: rgba(0,0,0,0.1);
+  border-radius: 4px;
+  overflow-x: auto;
+  white-space: pre;
+  color: var(--fg, #e2e8f0);
+}
+.tasks-popover-footer {
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(128,128,128,0.18);
+  opacity: 0.55;
+  font-size: 11px;
+}
+body.dark .tasks-popover { background: #0f172a; }

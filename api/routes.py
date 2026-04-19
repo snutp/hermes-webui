@@ -543,6 +543,70 @@ def handle_get(handler, parsed) -> bool:
         live = bool(sid and sid in STREAMS)
         return j(handler, {"stream_id": sid if live else None})
 
+    # Phase 4A: list background processes owned by this webui session.
+    # Feeds the "N tasks running" badge + hover popover (static/ui.js).
+    # Filter by session_key so each webui session only sees its own procs
+    # (same isolation rule as the notify_on_complete watcher).
+    if parsed.path == "/api/process/list":
+        session_id = parse_qs(parsed.query).get("session_id", [""])[0]
+        if not session_id:
+            return bad(handler, "session_id required")
+        tasks = []
+        degraded = False
+        try:
+            from tools.process_registry import process_registry as _pr
+        except ImportError:
+            # Expected during early boot / agent-less environments.
+            logger.debug("process_registry not importable yet", exc_info=True)
+            _pr = None
+        if _pr is not None:
+            try:
+                from tools.ansi_strip import strip_ansi
+            except ImportError:
+                def strip_ansi(s):  # type: ignore
+                    return s
+            try:
+                now_ts = time.time()
+                # _running is a private dict on the agent side. If the
+                # upstream renames this, the badge shouldn't silently lie —
+                # we degrade and log.
+                running_raw = getattr(_pr, "_running", None)
+                if running_raw is None:
+                    raise AttributeError("process_registry._running missing (upstream rename?)")
+                running = dict(running_raw)
+                for proc_id, sess in running.items():
+                    if getattr(sess, "session_key", "") != session_id:
+                        continue
+                    started = getattr(sess, "started_at", 0.0) or 0.0
+                    runtime = max(now_ts - started, 0.0) if started else 0.0
+                    tail_raw = getattr(sess, "output_buffer", "") or ""
+                    tail = strip_ansi(tail_raw[-500:])
+                    tasks.append({
+                        "proc_id": proc_id,
+                        "command": getattr(sess, "command", ""),
+                        "pid": getattr(sess, "pid", None),
+                        "started_at": started,
+                        "runtime_sec": round(runtime, 1),
+                        "notify_on_complete": bool(getattr(sess, "notify_on_complete", False)),
+                        "watch_patterns": list(getattr(sess, "watch_patterns", []) or []),
+                        "tail": tail,
+                    })
+            except Exception:
+                # Real runtime failure — surface it instead of returning a
+                # silent empty list. Client can show a degraded indicator.
+                degraded = True
+                logger.warning(
+                    "process_registry introspection failed for /api/process/list; "
+                    "badge may be degraded",
+                    exc_info=True,
+                )
+        # Newest-started first so the popover leads with the most relevant
+        tasks.sort(key=lambda t: t.get("started_at") or 0.0, reverse=True)
+        payload = {"session_id": session_id, "tasks": tasks}
+        if degraded:
+            payload["degraded"] = True
+        return j(handler, payload)
+
     if parsed.path == "/api/chat/cancel":
         stream_id = parse_qs(parsed.query).get("stream_id", [""])[0]
         if not stream_id:
