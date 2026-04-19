@@ -644,6 +644,36 @@ function applyBotName(){
   // Update profile chip label immediately
   const profileLabel=$('profileChipLabel');
   if(profileLabel) profileLabel.textContent=S.activeProfile||'default';
+  // Phase 5: persist "last seen" context for the agent-offline.html fallback.
+  // When portal reaps this webui and the browser hits a 502, that page reads
+  // localStorage['webui:last'] to show when the user was last here and which
+  // project to restart. Refreshed every 30s while the tab is alive.
+  (function _initLastSeen(){
+    function save(){
+      try{
+        const portMatch = location.pathname.match(/\/agent\/(\d+)/);
+        const port = portMatch ? portMatch[1] : null;
+        const profile = (S && S.activeProfile) || 'default';
+        // profile naming convention from portal: "portal-<code>" (lowercase).
+        // Portal URLs use the code in uppercase; store both so the offline
+        // page can round-trip cleanly.
+        const m = profile.match(/^portal-(.+)$/i);
+        const codeRaw = m ? m[1] : null;
+        const projectCode = codeRaw ? codeRaw.toUpperCase() : null;
+        localStorage.setItem('webui:last', JSON.stringify({
+          ts: Date.now(),
+          port,
+          profile,
+          projectCode,
+        }));
+      }catch(e){ /* localStorage full / blocked — safe to ignore */ }
+    }
+    save();
+    setInterval(save, 30000);
+    // Also refresh on visibilitychange so the timestamp doesn't lag when the
+    // user returns to a long-idle tab right before the reaper fires.
+    document.addEventListener('visibilitychange', () => { if(!document.hidden) save(); });
+  })();
   // Fetch available models from server and populate dropdown dynamically
   await populateModelDropdown();
   // Restore last-used model preference
