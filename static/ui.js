@@ -1271,7 +1271,10 @@ function buildToolCard(tc){
   const runIndicator=tc.done===false?'<span class="tool-card-running-dot"></span>':'';
   const isSubagent=tc.name==='subagent_progress';
   const isDelegation=tc.name==='delegate_task';
-  const cardClass='tool-card'+(tc.done===false?' tool-card-running':'')+(isSubagent?' tool-card-subagent':'');
+  // Option C: interrupted tools render with the amber ribbon (see data-interrupted CSS).
+  // They are NOT running, so no running class — the CSS styles the card itself via the data-attr.
+  const interruptedAttr=tc.interrupted?' data-interrupted="1"':'';
+  const cardClass='tool-card'+(tc.done===false&&!tc.interrupted?' tool-card-running':'')+(isSubagent?' tool-card-subagent':'');
   // Clean up legacy subagent prefixes since the Lucide icon already shows it
   let displayName=tc.name;
   if(isSubagent) displayName='Subagent';
@@ -1279,7 +1282,7 @@ function buildToolCard(tc){
   let previewText=tc.preview||displaySnippet||'';
   if(isSubagent) previewText=previewText.replace(/^(?:\u{1F500}|↳)\s*/u,'');
   row.innerHTML=`
-    <div class="${cardClass}">
+    <div class="${cardClass}"${interruptedAttr}>
       <div class="tool-card-header" onclick="this.closest('.tool-card').classList.toggle('open')">
         ${runIndicator}
         <span class="tool-card-icon">${icon}</span>

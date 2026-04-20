@@ -479,23 +479,33 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         // tool was in flight. The backend already synthesized tool_results
         // for unresolved tool_use blocks (kept API history valid) and sent
         // the updated session in `d.session`, so we refresh S.messages from
-        // that snapshot instead of pushing a synthetic assistant marker.
+        // that snapshot. Then we migrate the live-card "interrupted" state
+        // into S.toolCalls (the server may not have saved the in-flight
+        // tool, so we can't rely on d.session.tool_calls alone) and drop
+        // #liveToolCards — renderMessages() re-draws interrupted cards in
+        // the message history via buildToolCard's data-interrupted path.
         let d=null;
         try{d=JSON.parse(e.data);}catch(_){d=null;}
         removeThinking();
-        markLiveToolCardsInterrupted();
         if(d&&d.session){
           S.session=d.session;
           S.messages=d.session.messages||S.messages;
-          if(d.session.tool_calls&&d.session.tool_calls.length){
-            S.toolCalls=d.session.tool_calls.map(tc=>({...tc,done:true}));
-          } else {
-            S.toolCalls=(S.toolCalls||[]).map(tc=>({...tc,done:true,interrupted:tc.done?false:true}));
-          }
         } else {
           // Fallback for pre-Option-C servers: show the simple marker.
           S.messages.push({role:'assistant',content:'*Task cancelled.*'});
         }
+        // Flip unfinished tool calls to done+interrupted. Client's S.toolCalls
+        // is the authoritative source (built from 'tool'/'tool_complete' SSE
+        // events during the turn) — server session may miss the in-flight
+        // tool since it was never persisted.
+        S.toolCalls=(S.toolCalls||[]).map(tc=>{
+          const wasRunning=tc.done===false;
+          return {...tc, done:true, interrupted: wasRunning || !!tc.interrupted};
+        });
+        // Now that the interrupted flag lives on S.toolCalls, the history
+        // render will produce correctly-marked cards. Drop the live DOM
+        // container so we don't show two copies of the same card.
+        clearLiveToolCards&&clearLiveToolCards();
         // Small trailing marker so the user sees WHEN the interruption
         // happened in the visual timeline — the tool_result inside the
         // message history already documents WHAT was cancelled.
